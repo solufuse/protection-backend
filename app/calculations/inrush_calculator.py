@@ -10,7 +10,12 @@ def calculate_single_transformer(tx) -> dict:
     tau = tx.tau_ms
 
     # 1. Calcul du Courant Nominal (In) en Ampères
-    if u == 0: return {"error": "Tension nulle", "name": tx.name}
+    if u == 0: 
+        return {
+            "error": "Tension nulle", 
+            "transformer_name": tx.name,
+            "sn_kva": sn, "u_kv": u, "ratio_iencl": ratio, "tau_ms": tau
+        }
     
     i_nom = sn / (math.sqrt(3) * u)
     
@@ -28,6 +33,12 @@ def calculate_single_transformer(tx) -> dict:
 
     return {
         "transformer_name": tx.name,
+        # --- AJOUT DES PARAMÈTRES D'ENTRÉE ---
+        "sn_kva": sn,
+        "u_kv": u,
+        "ratio_iencl": ratio,
+        "tau_ms": tau,
+        # -------------------------------------
         "i_nominal": round(i_nom, 2),
         "i_peak": round(i_peak_max, 2),
         "decay_curve": curve
