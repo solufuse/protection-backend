@@ -1,14 +1,18 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 from app.schemas.inrush_schema import InrushRequest
 from app.calculations import inrush_calculator
+from app.core.security import get_current_token
 import json
 
 router = APIRouter(prefix="/inrush", tags=["Inrush Calculation"])
 
 @router.post("/calculate")
-async def calculate_inrush_json(request: InrushRequest):
+async def calculate_inrush_json(
+    request: InrushRequest, 
+    token: str = Depends(get_current_token) # <--- LE VERROU EST ICI
+):
     """
-    Calcul via JSON brut (Copier-coller dans le Body).
+    Calcul via JSON brut. Nécessite un Token valide.
     """
     if not request.transformers:
         raise HTTPException(status_code=400, detail="Liste vide.")
@@ -23,25 +27,22 @@ async def calculate_inrush_json(request: InrushRequest):
     }
 
 @router.post("/calculate-file")
-async def calculate_inrush_file(file: UploadFile = File(...)):
+async def calculate_inrush_file(
+    file: UploadFile = File(...),
+    token: str = Depends(get_current_token) # <--- ICI AUSSI
+):
     """
-    Calcul via UPLOAD de fichier (.json).
-    Déposez votre 'config.json' ici.
+    Calcul via UPLOAD. Nécessite un Token valide.
     """
     try:
         content = await file.read()
         data = json.loads(content)
-        
-        # Validation Pydantic automatique
-        # Si le fichier ne correspond pas au format, ça lèvera une erreur
         request = InrushRequest(**data)
-        
     except json.JSONDecodeError:
-        raise HTTPException(status_code=422, detail="Le fichier n'est pas un JSON valide.")
+        raise HTTPException(status_code=422, detail="JSON invalide.")
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Erreur de lecture ou de format : {e}")
+        raise HTTPException(status_code=422, detail=f"Erreur : {e}")
 
-    # Lancement du calcul
     results = inrush_calculator.process_inrush_request(request.transformers)
     
     return {
