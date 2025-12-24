@@ -22,8 +22,7 @@ def calculate_single_transformer(tx) -> dict:
     # 2. Pic Max
     i_peak_max = i_nom * ratio
 
-    # 3. Calcul des courbes
-    curve_peak = {}
+    # 3. Calcul de la courbe RMS
     curve_rms = {}
     
     for t_ms in TIME_STEPS:
@@ -35,7 +34,6 @@ def calculate_single_transformer(tx) -> dict:
         # RMS = Peak / sqrt(2)
         val_rms = val_peak / math.sqrt(2)
 
-        curve_peak[f"{t_ms}ms"] = round(val_peak, 2)
         curve_rms[f"{t_ms}ms"] = round(val_rms, 2)
 
     return {
@@ -45,9 +43,8 @@ def calculate_single_transformer(tx) -> dict:
         "ratio_iencl": ratio,
         "tau_ms": tau,
         "i_nominal": round(i_nom, 2),
-        "i_peak": round(i_peak_max, 2),
-        "decay_curve": curve_peak,       # Crête
-        "decay_curve_rms": curve_rms     # Efficace (Ce que vous voulez)
+        "i_peak": round(i_peak_max, 2), # Valeur pic à t=0 (info)
+        "decay_curve_rms": curve_rms    # La seule courbe renvoyée
     }
 
 def process_inrush_request(transformers_list):
