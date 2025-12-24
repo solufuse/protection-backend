@@ -13,10 +13,11 @@ class InrushRequest(BaseModel):
 
 class InrushResult(BaseModel):
     transformer_name: str
-    sn_kva: float       # <--- Ajout pour historique
-    u_kv: float         # <--- Ajout pour historique
-    ratio_iencl: float  # <--- Ajout pour historique
-    tau_ms: float       # <--- Ajout pour historique
+    sn_kva: float
+    u_kv: float
+    ratio_iencl: float
+    tau_ms: float
     i_nominal: float
     i_peak: float
-    decay_curve: Dict[str, float]
+    decay_curve: Dict[str, float]      # Valeurs Crêtes (Physique)
+    decay_curve_rms: Dict[str, float]  # Valeurs Efficaces (Relais) <--- NOUVEAU
