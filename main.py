@@ -1,8 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import protection
+from app.routers import system, auth, session, ingestion, engine
 
-app = FastAPI(title="Solufuse API V2.1 (Architectured)")
+app = FastAPI(title="Solufuse Backend V2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -12,8 +12,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(protection.router)
-
-@app.get("/")
-def read_root():
-    return {"status": "Online", "architecture": "Core + Managers + Services"}
+app.include_router(system.router)
+app.include_router(auth.router)
+app.include_router(session.router)
+app.include_router(ingestion.router)
+app.include_router(engine.router) # <--- Ajout du moteur
