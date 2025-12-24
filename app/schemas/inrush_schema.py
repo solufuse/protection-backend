@@ -18,6 +18,5 @@ class InrushResult(BaseModel):
     ratio_iencl: float
     tau_ms: float
     i_nominal: float
-    i_peak: float
-    decay_curve: Dict[str, float]      # Valeurs Crêtes (Physique)
-    decay_curve_rms: Dict[str, float]  # Valeurs Efficaces (Relais) <--- NOUVEAU
+    i_peak: float                     # On garde la valeur pic unique (info utile)
+    decay_curve_rms: Dict[str, float] # UNIQUEMENT la courbe RMS
