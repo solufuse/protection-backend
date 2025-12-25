@@ -5,3 +5,5 @@ pandas
 openpyxl
 numpy
 python-jose[cryptography]
+
+firebase-admin
