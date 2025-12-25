@@ -2,47 +2,66 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
 class LoadflowSettings(BaseModel):
-    target_mw: float = Field(..., description="Valeur cible en MW")
-    tolerance_mw: float = Field(0.3, description="Tolérance (+/-)")
-    swing_bus_id: Optional[str] = Field(None, description="Bus Swing (Optionnel)")
-    tap_transformers_ids: List[str] = Field(default_factory=list)
+    """
+    Configuration settings for the Loadflow Analysis logic.
+    """
+    target_mw: float = Field(..., description="Target Active Power (MW) value to reach at the Swing Bus (e.g., -80.0).")
+    tolerance_mw: float = Field(0.3, description="Acceptable tolerance range (+/- MW) around the target.")
+    swing_bus_id: Optional[str] = Field(None, description="Name of the Swing Bus to monitor (e.g., 'Bus RTE 1'). If null, auto-detection is attempted.")
+    tap_transformers_ids: List[str] = Field(default_factory=list, description="Deprecated. The script now auto-scans all transformers.")
 
 class SwingBusInfo(BaseModel):
-    config: Optional[str] = None
-    script: Optional[str] = None
+    """
+    Details about the Swing Bus identification process.
+    """
+    config: Optional[str] = Field(None, description="The Swing Bus name requested in the configuration.")
+    script: Optional[str] = Field(None, description="The Swing Bus name actually found and used in the file.")
 
 class StudyCaseInfo(BaseModel):
-    id: Optional[str] = None        # Ex: LF_198
-    config: Optional[str] = None    # Ex: Normal
-    revision: Optional[str] = None  # Ex: CH199
+    """
+    Metadata extracted from the 'ILFStudyCase' table to identify the scenario.
+    """
+    id: Optional[str] = Field(None, description="Study Case ID (e.g., 'LF_198').")
+    config: Optional[str] = Field(None, description="Configuration name (e.g., 'Normal').")
+    revision: Optional[str] = Field(None, description="Revision name (e.g., 'CH199').")
 
 class TransformerData(BaseModel):
-    tap: Optional[float] = None
-    mw: Optional[float] = None
-    mvar: Optional[float] = None
-    amp: Optional[float] = None
-    kv: Optional[float] = None
-    volt_mag: Optional[float] = None
-    pf: Optional[float] = None
+    """
+    Electrical data extracted for a specific transformer.
+    """
+    tap: Optional[float] = Field(None, description="Tap position.")
+    mw: Optional[float] = Field(None, description="Active Power flow (MW).")
+    mvar: Optional[float] = Field(None, description="Reactive Power flow (Mvar).")
+    amp: Optional[float] = Field(None, description="Current flow (Amp).")
+    kv: Optional[float] = Field(None, description="Voltage level (kV).")
+    volt_mag: Optional[float] = Field(None, description="Voltage Magnitude (%).")
+    pf: Optional[float] = Field(None, description="Power Factor (%).")
 
 class LoadflowResultFile(BaseModel):
-    filename: str
-    is_valid: bool = False
+    """
+    Analysis result for a single uploaded file.
+    """
+    filename: str = Field(..., description="Name of the analyzed file.")
+    is_valid: bool = Field(False, description="True if the file could be parsed successfully.")
     
-    # NOUVEAU : Infos du scénario
-    study_case: Optional[StudyCaseInfo] = None
+    study_case: Optional[StudyCaseInfo] = Field(None, description="Scenario metadata (ID, Config, Revision).")
     
-    swing_bus_found: Optional[SwingBusInfo] = None
-    mw_flow: Optional[float] = None
-    mvar_flow: Optional[float] = None
-    transformers: Dict[str, TransformerData] = {}
-    delta_target: Optional[float] = None
+    swing_bus_found: Optional[SwingBusInfo] = Field(None, description="Info regarding the Swing Bus detection.")
+    mw_flow: Optional[float] = Field(None, description="Active Power measured at the Swing Bus.")
+    mvar_flow: Optional[float] = Field(None, description="Reactive Power measured at the Swing Bus.")
     
-    is_winner: bool = False
-    victory_reason: Optional[str] = None
-    status_color: str = "red"
+    transformers: Dict[str, TransformerData] = Field({}, description="Dictionary of transformers found (Key: Transfo ID).")
+    
+    delta_target: Optional[float] = Field(None, description="Absolute difference between measured MW and target MW.")
+    
+    is_winner: bool = Field(False, description="True if this file is the best candidate for its specific Scenario group.")
+    victory_reason: Optional[str] = Field(None, description="Explanation of why this file won (e.g., 'Precision', 'Validity').")
+    status_color: str = Field("red", description="Visual indicator: 'green' (in tolerance), 'orange' (close), 'red' (far).")
 
 class LoadflowResponse(BaseModel):
-    status: str
-    best_file: Optional[str] = None # (Obsolète en multi-scénario, garde le dernier)
-    results: List[LoadflowResultFile]
+    """
+    Global response object for the Loadflow Analysis endpoint.
+    """
+    status: str = Field(..., description="Execution status ('success' or 'error').")
+    best_file: Optional[str] = Field(None, description="Filename of the overall best file (Legacy field).")
+    results: List[LoadflowResultFile] = Field(..., description="List of results for all analyzed files.")
