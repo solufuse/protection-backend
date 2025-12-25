@@ -30,7 +30,7 @@ class LoadflowResultFile(BaseModel):
     delta_target: Optional[float] = None
     
     is_winner: bool = False
-    victory_reason: Optional[str] = None # <--- NOUVEAU CHAMP
+    victory_reason: Optional[str] = None
     status_color: str = "red"
 
 class LoadflowResponse(BaseModel):
