@@ -47,9 +47,6 @@ async def export_all_files(
     format: str = Query("xlsx", regex="^(xlsx|json)$"),
     token: str = Depends(get_current_token)
 ):
-    """
-    Export TOUT dans un tableau unique.
-    """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
@@ -62,8 +59,14 @@ async def export_all_files(
     flat_rows = []
 
     for res in results:
+        # Récupération infos Scénario
+        sc = res.get("study_case", {})
+        
         base_info = {
             "Fichier": res["filename"],
+            "Etude ID": sc.get("id"),       # <--- NOUVEAU
+            "Config": sc.get("config"),     # <--- NOUVEAU
+            "Revision": sc.get("revision"), # <--- NOUVEAU
             "Status": "Gagnant" if res.get("is_winner") else "Non retenu",
             "Raison Victoire": res.get("victory_reason"),
             "MW Flow": res.get("mw_flow"),
@@ -92,8 +95,8 @@ async def export_all_files(
 
     df_final = pd.DataFrame(flat_rows)
     
-    # Ordre des colonnes
-    cols = ["Fichier", "Status", "Raison Victoire", "MW Flow", "Ecart Cible"]
+    # Ordre colonnes : ID/Config/Revision en premier
+    cols = ["Fichier", "Etude ID", "Config", "Revision", "Status", "Raison Victoire", "MW Flow", "Ecart Cible"]
     other_cols = [c for c in df_final.columns if c not in cols]
     if not df_final.empty:
         df_final = df_final[cols + other_cols]
@@ -102,7 +105,7 @@ async def export_all_files(
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_final.to_excel(writer, sheet_name="Resultats", index=False)
         for col in writer.sheets["Resultats"].columns:
-            try: writer.sheets["Resultats"].column_dimensions[col[0].column_letter].width = 20
+            try: writer.sheets["Resultats"].column_dimensions[col[0].column_letter].width = 18
             except: pass
 
     output.seek(0)
