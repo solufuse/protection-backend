@@ -1,10 +1,11 @@
 import pandas as pd
 import math
+import os
 from app.calculations import si2s_converter
 from app.schemas.loadflow_schema import TransformerData, SwingBusInfo
 
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
-    print(f"🚀 DÉBUT ANALYSE (MODE BATTLE LOG)")
+    print(f"🚀 DÉBUT ANALYSE (AVEC RAISON VICTOIRE)")
     results = []
     
     target = settings.target_mw
@@ -14,11 +15,16 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
     champion_file = None
     champion_delta = float('inf')
     champion_is_valid = False
+    champion_reason = None # On stocke la raison ici
 
     # --- 1. TRAITEMENT ---
     for filename, content in files_content.items():
-        ext = filename.lower()
-        if not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
+        # Nettoyage nom de fichier
+        clean_name = os.path.basename(filename)
+        ext = clean_name.lower()
+        
+        # FILTRE : Ignore les fichiers temporaires (~$) et les extensions non supportées
+        if clean_name.startswith('~$') or not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
             continue
 
         res = {
@@ -30,14 +36,17 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             "transformers": {},
             "delta_target": None,
             "status_color": "red",
-            "is_winner": False
+            "is_winner": False,
+            "victory_reason": None
         }
 
-        # 1. Extraction
+        # 1. Extraction (Protection Try/Except renforcée)
         try:
             dfs = si2s_converter.extract_data_from_si2s(content)
             if dfs and "data" in dfs and isinstance(dfs["data"], dict): dfs = dfs["data"]
-        except: dfs = None
+        except Exception as e:
+            # On ignore silencieusement les erreurs de lecture pour ne pas polluer
+            dfs = None
             
         if not dfs:
             results.append(res); continue
@@ -83,7 +92,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                         try: res["mvar_flow"] = float(str(row[col_mvar]).replace(',', '.'))
                         except: pass
 
-        # 4. Transfos (Extraction complète)
+        # 4. Transfos
         if df_tx is not None and df_lfr is not None:
             col_id_tx = next((c for c in df_tx.columns if c.upper() in ['ID', 'DEVICE ID']), None)
             col_from = next((c for c in df_tx.columns if c.upper() in ['FROMBUS', 'FROMID', 'FROMTO']), None)
@@ -128,52 +137,37 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                         except: pass
                         res["transformers"][tx_id] = data
 
-        # --- 5. LOGIQUE DE VICTOIRE (BATTLE) ---
+        # --- 5. LOGIQUE BATTLE ---
         if res["mw_flow"] is not None:
-            # Calcul Delta
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
-            
-            # Statut Couleur
             candidate_is_valid = delta <= tol
             
             if candidate_is_valid: res["status_color"] = "green"
             elif delta <= (tol * 2): res["status_color"] = "orange"
             else: res["status_color"] = "red"
             
-            # --- COMBAT ---
-            # print(f"🥊 {filename} monte sur le ring (Delta: {res['delta_target']}, Valid: {candidate_is_valid})")
-            
             is_new_king = False
+            reason = ""
             
             if champion_file is None:
-                is_new_king = True
-                reason = "Premier candidat"
+                is_new_king = True; reason = "Premier candidat"
             else:
-                # 1. Le candidat est VERT, le champion est ROUGE -> Victoire KO
                 if candidate_is_valid and not champion_is_valid:
-                    is_new_king = True
-                    reason = "Validité (Vert bat Rouge)"
-                
-                # 2. Les deux sont VERTS -> Le plus précis gagne
+                    is_new_king = True; reason = "Validité (Vert bat Rouge)"
                 elif candidate_is_valid and champion_is_valid:
                     if delta < champion_delta:
-                        is_new_king = True
-                        reason = f"Précision ({delta} < {champion_delta})"
-                
-                # 3. Les deux sont ROUGES -> Le moins pire gagne
+                        is_new_king = True; reason = f"Précision ({delta} < {champion_delta})"
                 elif not candidate_is_valid and not champion_is_valid:
                     if delta < champion_delta:
-                        is_new_king = True
-                        reason = f"Proximité ({delta} < {champion_delta})"
+                        is_new_king = True; reason = f"Proximité ({delta} < {champion_delta})"
 
             if is_new_king:
-                print(f"   👑 NOUVEAU ROI : {filename} | Delta: {res['delta_target']} | Raison: {reason}")
+                print(f"   👑 NOUVEAU ROI : {filename} | {reason}")
                 champion_file = filename
                 champion_delta = delta
                 champion_is_valid = candidate_is_valid
-            # else:
-                # print(f"   ❌ {filename} perd contre {champion_file}")
+                champion_reason = reason # On mémorise la raison
 
         results.append(res)
 
@@ -183,6 +177,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         for r in results:
             if r["filename"] == champion_file:
                 r["is_winner"] = True
+                r["victory_reason"] = champion_reason # On l'injecte dans le résultat final
                 final_best_result = r
                 break
     
