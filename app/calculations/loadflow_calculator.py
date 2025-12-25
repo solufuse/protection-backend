@@ -5,25 +5,46 @@ from app.calculations import si2s_converter
 from app.schemas.loadflow_schema import TransformerData, SwingBusInfo, StudyCaseInfo
 
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
-    print(f"🚀 DÉBUT ANALYSE (MULTI-SCÉNARIOS)")
+    """
+    Core logic for Loadflow Analysis.
+
+    Process:
+    1. Parse each file (SQLite/JSON extraction).
+    2. Identify Study Case metadata (ID, Config) to group files by scenario.
+    3. Extract Swing Bus flows (MW, Mvar).
+    4. Extract Transformer data (Taps, Amps, etc.) by mapping IXFMR2 (topology) to LFR (results).
+    5. Determine the 'Winner' for each scenario group based on Target MW and Tolerance.
+
+    Args:
+        files_content (dict): Dictionary {filename: content_bytes/string}.
+        settings (LoadflowSettings): Target MW, Tolerance, etc.
+        only_winners (bool): If True, filters the output list to return only winning files.
+
+    Returns:
+        dict: A dictionary matching the LoadflowResponse schema.
+    """
+    print(f"🚀 START ANALYSIS (Multi-Scenario Strategy)")
     results = []
     
     target = settings.target_mw
     tol = settings.tolerance_mw
     
-    # Dictionnaire des champions : Clé = (ID, Config) -> Valeur = {filename, delta, valid, reason}
+    # Dictionary to track the champion for each scenario group.
+    # Key: (StudyID, Config) -> Value: {filename, delta, valid, reason}
     champions = {}
 
     for filename, content in files_content.items():
         clean_name = os.path.basename(filename)
         ext = clean_name.lower()
+        
+        # Skip temporary files or unsupported extensions
         if clean_name.startswith('~$') or not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
             continue
 
         res = {
             "filename": filename,
             "is_valid": False,
-            "study_case": {"id": None, "config": None, "revision": None}, # Default
+            "study_case": {"id": None, "config": None, "revision": None},
             "swing_bus_found": { "config": settings.swing_bus_id, "script": None },
             "mw_flow": None,
             "mvar_flow": None,
@@ -34,8 +55,10 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             "victory_reason": None
         }
 
+        # --- 1. DATA EXTRACTION ---
         try:
             dfs = si2s_converter.extract_data_from_si2s(content)
+            # Handle nested 'data' wrapper if present (common in JSON dumps)
             if dfs and "data" in dfs and isinstance(dfs["data"], dict): dfs = dfs["data"]
         except: dfs = None
             
@@ -44,26 +67,23 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             
         res["is_valid"] = True
         
-        # --- 1. EXTRACTION ILFStudyCase (ID, Config, Revision) ---
-        study_id = "Inconnu"
-        study_cfg = "Inconnu"
-        study_rev = "Inconnu"
+        # --- 2. EXTRACT STUDY CASE METADATA ---
+        study_id = "Unknown"
+        study_cfg = "Unknown"
+        study_rev = "Unknown"
         
         if "ILFStudyCase" in dfs:
             val = dfs["ILFStudyCase"]
             df_study = pd.DataFrame(val) if isinstance(val, list) else val
             if df_study is not None and not df_study.empty:
-                # Nettoyage colonnes
                 df_study.columns = [str(c).strip() for c in df_study.columns]
-                
-                # Lecture (si colonnes existent)
                 if "ID" in df_study.columns: study_id = str(df_study.iloc[0]["ID"])
                 if "Config" in df_study.columns: study_cfg = str(df_study.iloc[0]["Config"])
                 if "Revision" in df_study.columns: study_rev = str(df_study.iloc[0]["Revision"])
 
         res["study_case"] = {"id": study_id, "config": study_cfg, "revision": study_rev}
 
-        # --- 2. PREPA TABLES ---
+        # --- 3. PREPARE DATAFRAMES ---
         df_lfr = None; df_tx = None
         for k in dfs.keys():
             key_upper = k.upper()
@@ -75,10 +95,12 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         if df_lfr is not None: df_lfr.columns = [str(c).strip() for c in df_lfr.columns]
         if df_tx is not None: df_tx.columns = [str(c).strip() for c in df_tx.columns]
 
-        # --- 3. LECTURE FLUX ---
+        # --- 4. SWING BUS FLOW (MW/MVAR) ---
         target_bus_id = settings.swing_bus_id
         if df_lfr is not None:
             col_id_any = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'IDFROM']), None)
+            
+            # Auto-detect Swing Bus if not provided in config
             if not target_bus_id and col_id_any:
                 col_type = next((c for c in df_lfr.columns if 'TYPE' in c.upper()), None)
                 if col_type:
@@ -90,6 +112,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                 col_mw = next((c for c in df_lfr.columns if c.upper() in ['LFMW', 'MW', 'MWLOADING', 'P (MW)']), None)
                 col_mvar = next((c for c in df_lfr.columns if c.upper() in ['LFMVAR', 'MVAR']), None)
                 cols_search = [c for c in df_lfr.columns if c.upper() in ['ID', 'IDFROM', 'IDTO']]
+                
                 mask = pd.Series(False, index=df_lfr.index)
                 for c in cols_search: mask |= (df_lfr[c] == target_bus_id)
                 rows = df_lfr[mask]
@@ -102,7 +125,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                         try: res["mvar_flow"] = float(str(row[col_mvar]).replace(',', '.'))
                         except: pass
 
-        # --- 4. TRANSFOS ---
+        # --- 5. TRANSFORMERS DATA EXTRACTION ---
         if df_tx is not None and df_lfr is not None:
             col_id_tx = next((c for c in df_tx.columns if c.upper() in ['ID', 'DEVICE ID']), None)
             col_from = next((c for c in df_tx.columns if c.upper() in ['FROMBUS', 'FROMID', 'FROMTO']), None)
@@ -122,9 +145,11 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                     tx_id = str(row_tx[col_id_tx])
                     bus_from = str(row_tx[col_from])
                     bus_to = str(row_tx[col_to])
+                    
                     mask_normal = (df_lfr[col_lfr_from] == bus_from) & (df_lfr[col_lfr_to] == bus_to)
                     mask_reverse = (df_lfr[col_lfr_from] == bus_to) & (df_lfr[col_lfr_to] == bus_from)
                     matches = df_lfr[mask_normal | mask_reverse]
+                    
                     if not matches.empty:
                         selected_row = matches.iloc[0]
                         if col_tap:
@@ -133,6 +158,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                                     if float(str(r[col_tap]).replace(',', '.')) != 0:
                                         selected_row = r; break
                                 except: pass
+                        
                         data = TransformerData()
                         try:
                             if col_tap: data.tap = float(str(selected_row[col_tap]).replace(',', '.'))
@@ -145,7 +171,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                         except: pass
                         res["transformers"][tx_id] = data
 
-        # --- 5. LOGIQUE BATTLE PAR GROUPE (ID, Config) ---
+        # --- 6. BATTLE LOGIC (Per Scenario Group) ---
         if res["mw_flow"] is not None:
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
@@ -155,44 +181,44 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             elif delta <= (tol * 2): res["status_color"] = "orange"
             else: res["status_color"] = "red"
             
-            # Clé unique du scénario
+            # Identify the group key: (StudyID, Config)
             group_key = (study_id, study_cfg)
             
-            # Récupération du champion actuel pour ce groupe
+            # Retrieve current champion for this group
             current_champ = champions.get(group_key)
             
             is_new_king = False
             reason = ""
             
             if current_champ is None:
-                is_new_king = True; reason = "Premier candidat du groupe"
+                is_new_king = True; reason = "First candidate of the group"
             else:
                 champ_valid = current_champ["valid"]
                 champ_delta = current_champ["delta"]
                 
+                # Logic: Validity > Precision > Proximity
                 if candidate_is_valid and not champ_valid:
-                    is_new_king = True; reason = "Validité (Vert bat Rouge)"
+                    is_new_king = True; reason = "Validity (Green beats Red)"
                 elif candidate_is_valid and champ_valid:
                     if delta < champ_delta:
-                        is_new_king = True; reason = f"Précision ({delta} < {champ_delta})"
+                        is_new_king = True; reason = f"Precision ({delta} < {champ_delta})"
                 elif not candidate_is_valid and not champ_valid:
                     if delta < champ_delta:
-                        is_new_king = True; reason = f"Proximité ({delta} < {champ_delta})"
+                        is_new_king = True; reason = f"Proximity ({delta} < {champ_delta})"
 
             if is_new_king:
-                # Mise à jour du champion du groupe
                 champions[group_key] = {
                     "filename": filename,
                     "delta": delta,
                     "valid": candidate_is_valid,
                     "reason": reason
                 }
-                print(f"   👑 ROI [{study_id}/{study_cfg}] : {filename} | {reason}")
+                print(f"   👑 NEW KING [{study_id}/{study_cfg}] : {filename} | {reason}")
 
         results.append(res)
 
-    # --- 6. ATTRIBUTION DES VICTOIRES ---
-    # On parcourt tous les résultats et on marque ceux qui sont dans le dictionnaire 'champions'
+    # --- 7. FINALIZE WINNERS ---
+    # Mark files as winners based on the champions dict
     for r in results:
         s_id = r["study_case"]["id"]
         s_cfg = r["study_case"]["config"]
@@ -208,6 +234,6 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
 
     return {
         "status": "success",
-        "best_file": None, # (Multi-winners)
+        "best_file": None, # Deprecated in multi-scenario context
         "results": results
     }
