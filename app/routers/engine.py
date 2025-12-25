@@ -21,7 +21,7 @@ def get_merged_dataframes_for_calc(token: str):
     if not files: return {}
     merged_dfs = {}
     for name, content in files.items():
-        if is_supported(name): # <--- Support LF1S ici
+        if is_supported(name):
             dfs = si2s_converter.extract_data_from_si2s(content)
             if dfs:
                 for t, df in dfs.items():
@@ -35,6 +35,9 @@ def get_merged_dataframes_for_calc(token: str):
 
 def _execute_calculation_logic(config: ProjectConfig, token: str):
     dfs_dict = get_merged_dataframes_for_calc(token)
+    if not dfs_dict:
+         raise HTTPException(status_code=400, detail="Aucun fichier SI2S/LF1S trouvé en session pour faire le calcul.")
+
     config_updated = topology_manager.resolve_all(config, dfs_dict)
     return {
         "status": "success",
@@ -43,9 +46,48 @@ def _execute_calculation_logic(config: ProjectConfig, token: str):
         "plans": config_updated.plans
     }
 
-# --- ROUTES STANDARD ---
+def get_config_from_session(token: str) -> ProjectConfig:
+    files = session_manager.get_files(token)
+    if not files: raise HTTPException(status_code=400, detail="Session vide.")
+    
+    target_content = None
+    if "config.json" in files:
+        target_content = files["config.json"]
+    else:
+        for name, content in files.items():
+            if name.lower().endswith(".json"):
+                target_content = content
+                break
+    
+    if target_content is None:
+        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé en session.")
+
+    try:
+        data = json.loads(target_content)
+        return ProjectConfig(**data)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Config JSON invalide pour Engine-PC : {e}")
+
+# --- ROUTES ---
+
+@router.post("/run-json")
+async def run_study_manual(config: ProjectConfig, token: str = Depends(get_current_token)):
+    """
+    (Anciennement /run)
+    Calcul en envoyant le JSON de config dans le Body.
+    """
+    return _execute_calculation_logic(config, token)
+
 @router.post("/run")
-async def run_study_json(config: ProjectConfig, token: str = Depends(get_current_token)):
+async def run_study_auto(token: str = Depends(get_current_token)):
+    """
+    (NOUVEAU)
+    Calcul automatique utilisant le 'config.json' et les '.si2s' présents en session.
+    """
+    # 1. Récupération auto de la config
+    config = get_config_from_session(token)
+    
+    # 2. Exécution
     return _execute_calculation_logic(config, token)
 
 @router.post("/run-file")
@@ -55,27 +97,21 @@ async def run_study_file(file: UploadFile = File(...), token: str = Depends(get_
     except Exception as e: raise HTTPException(status_code=422, detail=f"Erreur config: {e}")
     return _execute_calculation_logic(valid_config, token)
 
-# --- DATA EXPLORER ---
-
+# --- DATA EXPLORER (Inchangé mais inclus pour l'update) ---
 def _collect_explorer_data(token, table_search, filename_filter):
     files = session_manager.get_files(token)
     if not files: return {}
     results = {}
     for fname, content in files.items():
         if filename_filter and filename_filter.lower() not in fname.lower(): continue
-        
-        if not is_supported(fname): continue # <--- Support LF1S
-
+        if not is_supported(fname): continue
         dfs = si2s_converter.extract_data_from_si2s(content)
         if not dfs: continue
-        
         file_results = {}
         for table_name, df in dfs.items():
             if table_search and table_search.upper() not in table_name.upper(): continue
             file_results[table_name] = df
-            
         if file_results: results[fname] = file_results
-            
     return results
 
 @router.get("/data-explorer")
@@ -98,7 +134,6 @@ def explore_si2s_data(
                     df_copy.insert(0, "_SourceFile", fname)
                     if t_name not in tables_aggregated: tables_aggregated[t_name] = []
                     tables_aggregated[t_name].append(df_copy)
-            
             for t_name, df_list in tables_aggregated.items():
                 sheet_name = t_name[:31]
                 full_df = pd.concat(df_list, ignore_index=True)
@@ -107,14 +142,8 @@ def explore_si2s_data(
                 while sheet_name in writer.book.sheetnames:
                     sheet_name = f"{base[:28]}_{count}"; count += 1
                 full_df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
         output.seek(0)
-        return StreamingResponse(
-            output,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=explorer_export.xlsx"}
-        )
-
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=explorer_export.xlsx"})
     elif export_format == "json":
         json_ready = {}
         for fname, tables in raw_data.items():
@@ -122,15 +151,10 @@ def explore_si2s_data(
             for t_name, df in tables.items():
                 json_ready[fname][t_name] = df.where(pd.notnull(df), None).to_dict(orient="records")
         return JSONResponse(content=json_ready, headers={"Content-Disposition": "attachment; filename=explorer.json"})
-
     else:
         preview_data = {}
         for fname, tables in raw_data.items():
             preview_data[fname] = {}
             for t_name, df in tables.items():
-                preview_data[fname][t_name] = {
-                    "rows": len(df),
-                    "columns": list(df.columns),
-                    "preview": df.head(20).where(pd.notnull(df), None).to_dict(orient="records")
-                }
+                preview_data[fname][t_name] = {"rows": len(df), "columns": list(df.columns), "preview": df.head(20).where(pd.notnull(df), None).to_dict(orient="records")}
         return {"mode": "preview", "filters": {"filename": filename}, "data": preview_data}
