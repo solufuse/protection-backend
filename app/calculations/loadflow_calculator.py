@@ -4,24 +4,22 @@ from app.calculations import si2s_converter
 from app.schemas.loadflow_schema import TransformerData, SwingBusInfo
 
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
-    """
-    only_winners: Si True, ne renvoie que les fichiers gagnants dans la liste 'results'.
-    """
-    print(f"🚀 DÉBUT ANALYSE (Only Winners: {only_winners})")
+    print(f"🚀 DÉBUT ANALYSE (Logique: Tolérance > Proximité)")
     results = []
     
     target = settings.target_mw
     tol = settings.tolerance_mw
+    
+    # Variables pour suivre le champion
     best_file = None
     min_delta = float('inf')
+    found_valid_candidate = False # Est-ce qu'on a trouvé au moins un fichier dans la tolérance ?
 
     # --- 1. TRAITEMENT ---
     for filename, content in files_content.items():
         ext = filename.lower()
         if not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
             continue
-
-        # print(f"\n📂 Analyse : {filename}")
 
         res = {
             "filename": filename,
@@ -39,8 +37,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             dfs = si2s_converter.extract_data_from_si2s(content)
             if dfs and "data" in dfs and isinstance(dfs["data"], dict):
                 dfs = dfs["data"]
-        except:
-            dfs = None
+        except: dfs = None
             
         if not dfs:
             results.append(res)
@@ -49,16 +46,13 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         res["is_valid"] = True
         
         # --- Tables ---
-        df_lfr = None
-        df_tx = None
+        df_lfr = None; df_tx = None
         for k in dfs.keys():
             key_upper = k.upper()
             if key_upper in ['LFR', 'BUSLOADSUMMARY']:
-                val = dfs[k]
-                df_lfr = pd.DataFrame(val) if isinstance(val, list) else val
+                val = dfs[k]; df_lfr = pd.DataFrame(val) if isinstance(val, list) else val
             elif 'IXFMR2' in key_upper:
-                val = dfs[k]
-                df_tx = pd.DataFrame(val) if isinstance(val, list) else val
+                val = dfs[k]; df_tx = pd.DataFrame(val) if isinstance(val, list) else val
 
         if df_lfr is not None: df_lfr.columns = [str(c).strip() for c in df_lfr.columns]
         if df_tx is not None: df_tx.columns = [str(c).strip() for c in df_tx.columns]
@@ -76,7 +70,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
 
             if target_bus_id:
                 col_mw = next((c for c in df_lfr.columns if c.upper() in ['LFMW', 'MW', 'MWLOADING', 'P (MW)']), None)
-                col_mvar = next((c for c in df_lfr.columns if c.upper() in ['LFMVAR', 'MVAR', 'Q (MVAR)']), None)
+                col_mvar = next((c for c in df_lfr.columns if c.upper() in ['LFMVAR', 'MVAR']), None)
                 cols_search = [c for c in df_lfr.columns if c.upper() in ['ID', 'IDFROM', 'IDTO']]
                 mask = pd.Series(False, index=df_lfr.index)
                 for c in cols_search: mask |= (df_lfr[c] == target_bus_id)
@@ -103,8 +97,6 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             col_mvar_val = next((c for c in df_lfr.columns if c.upper() == 'LFMVAR'), None)
             col_amp = next((c for c in df_lfr.columns if c.upper() == 'LFAMP'), None)
             col_kv = next((c for c in df_lfr.columns if c.upper() == 'KV'), None)
-            col_volt = next((c for c in df_lfr.columns if c.upper() == 'VOLTMAG'), None)
-            col_pf = next((c for c in df_lfr.columns if c.upper() == 'LFPF'), None)
 
             if col_id_tx and col_from and col_to and col_lfr_from and col_lfr_to:
                 for idx, row_tx in df_tx.iterrows():
@@ -130,33 +122,53 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                             if col_mvar_val: data.mvar = float(str(selected_row[col_mvar_val]).replace(',', '.'))
                             if col_amp: data.amp = float(str(selected_row[col_amp]).replace(',', '.'))
                             if col_kv: data.kv = float(str(selected_row[col_kv]).replace(',', '.'))
-                            if col_volt: data.volt_mag = float(str(selected_row[col_volt]).replace(',', '.'))
-                            if col_pf: data.pf = float(str(selected_row[col_pf]).replace(',', '.'))
                         except: pass
                         res["transformers"][tx_id] = data
 
-        # --- WINNER CALC ---
+        # --- LOGIQUE COMPARAISON GAGNANT ---
         if res["mw_flow"] is not None:
+            # 1. Calcul du Delta
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
+            current_is_valid = delta <= tol
             
-            if delta <= tol: res["status_color"] = "green"
+            # 2. Couleur
+            if current_is_valid: res["status_color"] = "green"
             elif delta <= (tol * 2): res["status_color"] = "orange"
             else: res["status_color"] = "red"
             
-            current_is_valid = delta <= tol
+            # 3. Élection du champion (Algorithme "King of the Hill")
+            update_best = False
             
             if best_file is None:
+                # Premier candidat : on le prend par défaut
+                update_best = True
+            else:
+                # Si le candidat actuel est valide (VERT)
+                if current_is_valid:
+                    if not found_valid_candidate:
+                        # On n'avait pas de valide avant, donc lui devient le roi direct
+                        update_best = True
+                    else:
+                        # On avait déjà un valide, on compare les deltas (le plus proche de la cible gagne)
+                        if delta < min_delta:
+                            update_best = True
+                
+                # Si le candidat actuel n'est PAS valide (ROUGE/ORANGE)
+                else:
+                    if not found_valid_candidate:
+                        # Si on n'a toujours pas de valide, on compare les "moins pires"
+                        if delta < min_delta:
+                            update_best = True
+                    # Sinon (si on a déjà un valide), le non-valide ne peut pas gagner, on ne fait rien
+            
+            # Application du changement de roi
+            if update_best:
                 best_file = filename
                 min_delta = delta
-            else:
-                if current_is_valid and min_delta > tol:
-                    min_delta = delta
-                    best_file = filename
-                elif (current_is_valid and min_delta <= tol) or (not current_is_valid and min_delta > tol):
-                    if delta < min_delta:
-                        min_delta = delta
-                        best_file = filename
+                if current_is_valid:
+                    found_valid_candidate = True
+
         results.append(res)
 
     # --- FINALISATION ---
@@ -168,9 +180,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                 final_best_result = r
                 break
     
-    # --- FILTRAGE OPTIONNEL (POUR /run-win) ---
     if only_winners:
-        # On ne garde que ceux qui sont marqués comme vainqueurs
         results = [r for r in results if r.get("is_winner") is True]
 
     return {
