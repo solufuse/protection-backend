@@ -7,10 +7,11 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 
 # --- CONFIGURATION ---
-# Ta clé secrète pour le développement (Bypass Google)
-MASTER_TOKEN = "sk_dev_9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9a8b"
+# On récupère le token depuis les variables d'environnement (Dokploy)
+# Si la variable n'existe pas, on met None (le bypass sera désactivé)
+MASTER_TOKEN = os.getenv("MASTER_TOKEN")
 
-# Init Firebase (si pas déjà fait)
+# Init Firebase
 if not firebase_admin._apps:
     firebase_creds_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
     if firebase_creds_json:
@@ -31,7 +32,6 @@ def get_current_token(
 ) -> str:
     token = None
     
-    # 1. On cherche le token dans le Header ou l'URL
     if auth_header:
         token = auth_header.credentials
     elif query_token:
@@ -40,15 +40,15 @@ def get_current_token(
     if not token:
         raise HTTPException(status_code=401, detail="Token manquant")
     
-    # --- 2. LA PORTE DÉROBÉE (Master Token) ---
-    # Si le token correspond à ta clé dev, on laisse passer !
-    if token == MASTER_TOKEN:
-        return "dev_master_user" # On renvoie un faux ID utilisateur
+    # --- LA PORTE DÉROBÉE (Master Token) ---
+    # On ne laisse passer que si MASTER_TOKEN est défini et correspond
+    if MASTER_TOKEN and token == MASTER_TOKEN:
+        return "dev_master_user"
 
-    # --- 3. SINON, VÉRIFICATION GOOGLE ---
+    # --- VÉRIFICATION GOOGLE ---
     try:
         decoded_token = auth.verify_id_token(token)
         return decoded_token['uid']
     except Exception as e:
-        print(f"Auth error: {e}")
+        # print(f"Auth error: {e}") # Décommenter pour debug
         raise HTTPException(status_code=401, detail="Token invalide")
