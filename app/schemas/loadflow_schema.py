@@ -28,15 +28,13 @@ class LoadflowResultFile(BaseModel):
     mvar_flow: Optional[float] = None
     transformers: Dict[str, TransformerData] = {}
     delta_target: Optional[float] = None
+    
     is_winner: bool = False
+    victory_reason: Optional[str] = None # <--- NOUVEAU CHAMP
     status_color: str = "red"
 
 class LoadflowResponse(BaseModel):
     status: str
     best_file: Optional[str] = None
-    
-    # NOUVEAU : Le gagnant isolé pour un accès facile
     best_result: Optional[LoadflowResultFile] = None
-    
-    # La liste complète (pour tout voir)
     results: List[LoadflowResultFile]
