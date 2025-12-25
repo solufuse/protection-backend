@@ -1,21 +1,17 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
-from app.core.session_manager import session_store
 from app.core.security import get_current_token
+from app.services import session_manager  # <--- Le même que Loadflow
 from typing import List
 import zipfile
 import io
 
 router = APIRouter(prefix="/session", tags=["Session RAM"])
 
-# --- 1. UPLOAD (Existante) ---
 @router.post("/upload")
-async def upload_files(files: List[UploadFile] = File(...), user_id: str = Depends(get_current_token)):
+async def upload_files(files: List[UploadFile] = File(...), token: str = Depends(get_current_token)):
     """
-    Upload fichiers vers la RAM. Gère l'extraction automatique des ZIP.
+    Upload fichiers vers la RAM partagée avec le Loadflow.
     """
-    if user_id not in session_store:
-        session_store[user_id] = {}
-
     count = 0
     for file in files:
         content = await file.read()
@@ -26,31 +22,34 @@ async def upload_files(files: List[UploadFile] = File(...), user_id: str = Depen
                 with zipfile.ZipFile(io.BytesIO(content)) as z:
                     for name in z.namelist():
                         if not name.endswith("/") and "__MACOSX" not in name:
-                            session_store[user_id][name] = z.read(name)
+                            # On utilise le service partagé
+                            session_manager.add_file(token, name, z.read(name))
                             count += 1
             except:
                 # Si échec extraction, on garde le zip tel quel
-                session_store[user_id][file.filename] = content
+                session_manager.add_file(token, file.filename, content)
                 count += 1
         else:
-            session_store[user_id][file.filename] = content
+            session_manager.add_file(token, file.filename, content)
             count += 1
             
-    return {"message": f"{count} fichiers ajoutés en mémoire.", "total_files": len(session_store[user_id])}
+    # On récupère le total pour confirmer
+    current_files = session_manager.get_files(token)
+    return {"message": f"{count} fichiers ajoutés.", "total_files": len(current_files)}
 
-# --- 2. DETAILS (Existante) ---
 @router.get("/details")
-def get_details(user_id: str = Depends(get_current_token)):
-    if user_id not in session_store:
-        return {"active": False, "file_count": 0, "files": []}
+def get_details(token: str = Depends(get_current_token)):
+    files = session_manager.get_files(token)
     
     files_info = []
-    for name, content in session_store[user_id].items():
-        files_info.append({
-            "filename": name,
-            "size": len(content),
-            "content_type": "application/octet-stream"
-        })
+    if files:
+        for name, content in files.items():
+            size = len(content) if isinstance(content, bytes) else len(str(content))
+            files_info.append({
+                "filename": name,
+                "size": size,
+                "content_type": "application/octet-stream"
+            })
         
     return {
         "active": True,
@@ -58,26 +57,18 @@ def get_details(user_id: str = Depends(get_current_token)):
         "files": files_info
     }
 
-# --- 3. DELETE ONE (Nouvelle) ---
 @router.delete("/file/{filename}")
-def delete_file(filename: str, user_id: str = Depends(get_current_token)):
-    """ Supprime un fichier spécifique de la RAM """
-    # On vérifie si l'utilisateur a une session
-    if user_id not in session_store:
-        raise HTTPException(status_code=404, detail="Session vide")
+def delete_file(filename: str, token: str = Depends(get_current_token)):
+    """ Supprime un fichier spécifique """
+    files = session_manager.get_files(token)
+    if not files or filename not in files:
+        raise HTTPException(status_code=404, detail="Fichier introuvable")
     
-    # On cherche le fichier (attention aux encodages URL)
-    # Parfois le filename arrive encodé, mais FastAPI gère souvent le décodage.
-    # On vérifie l'existence directe
-    if filename in session_store[user_id]:
-        del session_store[user_id][filename]
-        return {"status": "deleted", "filename": filename, "remaining": len(session_store[user_id])}
-    
-    raise HTTPException(status_code=404, detail=f"Fichier '{filename}' introuvable en session")
+    session_manager.remove_file(token, filename)
+    return {"status": "deleted", "filename": filename}
 
-# --- 4. CLEAR ALL (Nouvelle - C'est celle qui manquait !) ---
 @router.delete("/clear")
-def clear_session(user_id: str = Depends(get_current_token)):
-    """ Vide toute la mémoire de l'utilisateur """
-    session_store[user_id] = {}
+def clear_session(token: str = Depends(get_current_token)):
+    """ Vide toute la mémoire """
+    session_manager.clear_session(token)
     return {"status": "cleared", "message": "Mémoire session vidée."}
