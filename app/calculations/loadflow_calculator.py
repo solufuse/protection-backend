@@ -3,7 +3,7 @@ import math
 from app.calculations import si2s_converter
 
 def analyze_loadflow(files_content: dict, settings) -> dict:
-    print("🚀 DÉBUT ANALYSE LOADFLOW (MODE DEBUG LFR)")
+    print("🚀 DÉBUT ANALYSE LOADFLOW (MODE STRICT IDFROM)")
     results = []
     
     target = settings.target_mw
@@ -42,10 +42,10 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
             
         res["is_valid"] = True
         
-        # --- PREPARATION DES TABLES ---
+        # --- 1. IDENTIFICATION DES TABLES ---
         df_lfr = None
         for k in dfs.keys():
-            if k.upper() in ['LFR', 'BUSLOADSUMMARY', 'BUS RESULTS', 'SUMMARY']:
+            if k.upper() in ['LFR', 'BUSLOADSUMMARY', 'SUMMARY']:
                 df_lfr = dfs[k]
                 break
         
@@ -55,82 +55,92 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                 df_tx = dfs[k]
                 break
         
+        # Nettoyage noms de colonnes
         if df_lfr is not None: df_lfr.columns = [str(c).strip() for c in df_lfr.columns]
         if df_tx is not None: df_tx.columns = [str(c).strip() for c in df_tx.columns]
 
-        # --- A. LECTURE DES MW ---
+        # --- 2. LECTURE DES MW (CIBLE) ---
         target_bus_id = settings.swing_bus_id
         if df_lfr is not None:
-            col_id = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'BUS ID', 'IDFROM']), None)
+            # Pour le Swing, on cherche n'importe quelle colonne ID
+            col_id_any = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'IDFROM', 'IDTO']), None)
             
-            if not target_bus_id and col_id:
+            if not target_bus_id and col_id_any:
                 col_type = next((c for c in df_lfr.columns if 'TYPE' in c.upper()), None)
                 if col_type:
                     swing_row = df_lfr[df_lfr[col_type].astype(str).str.upper().str.contains('SWNG|SWING')]
                     if not swing_row.empty:
-                        target_bus_id = swing_row.iloc[0][col_id]
+                        target_bus_id = swing_row.iloc[0][col_id_any]
                         res["swing_bus_found"] = target_bus_id
 
-            if target_bus_id and col_id:
+            if target_bus_id:
+                cols_id = [c for c in df_lfr.columns if c.upper() in ['ID', 'IDFROM', 'IDTO']]
                 col_mw = next((c for c in df_lfr.columns if c.upper() in ['LFMW', 'MW', 'MWLOADING', 'P (MW)']), None)
-                if col_mw:
-                    row = df_lfr[df_lfr[col_id] == target_bus_id]
-                    if not row.empty:
+                
+                if cols_id and col_mw:
+                    mask = pd.Series(False, index=df_lfr.index)
+                    for c in cols_id:
+                        mask |= (df_lfr[c] == target_bus_id)
+                    
+                    rows = df_lfr[mask]
+                    if not rows.empty:
                         try:
-                            res["mw_flow"] = float(str(row.iloc[0][col_mw]).replace(',', '.'))
+                            res["mw_flow"] = float(str(rows.iloc[0][col_mw]).replace(',', '.'))
                         except: pass
 
-        # --- B. LECTURE DES TAPS (Jeu de piste) ---
+        # --- 3. LECTURE DES TAPS (STRICTEMENT VIA IDFROM) ---
         if df_tx is not None and df_lfr is not None and settings.tap_transformers_ids:
             
-            # --- DEBUG CRUCIAL : AFFICHER LES COLONNES DE LFR ---
-            print(f"📋 LISTE COLONNES TABLE LFR : {list(df_lfr.columns)}")
-            
-            # 1. Colonnes IXFMR2
+            # A. Colonnes IXFMR2
             col_id_tx = next((c for c in df_tx.columns if c.upper() in ['ID', 'DEVICE ID']), None)
-            col_link_bus = next((c for c in df_tx.columns if c.upper() in ['FROMTO', 'IDTO', 'TOBUS', 'SECID', 'SECONDARYBUSID']), None)
+            col_link_bus = next((c for c in df_tx.columns if c.upper() in ['TOBUS', 'FROMTO', 'IDTO', 'SECID']), None)
             
-            # 2. Colonnes LFR (On élargit la recherche)
-            col_id_lfr = next((c for c in df_lfr.columns if c.upper() in ['IDFROM', 'BUSID', 'ID']), None)
+            # B. Colonnes LFR (STRICTEMENT IDFROM)
+            col_id_from = next((c for c in df_lfr.columns if c.upper() == 'IDFROM'), None)
+            col_tap_lfr = next((c for c in df_lfr.columns if c.upper() == 'TAP'), None)
             
-            # Recherche Tap élargie
-            tap_candidates = ['TAP', 'TAPSETTING', 'CURRENTTAP', 'LTC', 'POSITION', 'STEP', 'FINAL_TAP', 'ADJTAP']
-            col_tap_lfr = next((c for c in df_lfr.columns if c.upper() in tap_candidates), None)
-            
-            # Si pas trouvé, on cherche n'importe quoi qui contient "TAP"
-            if not col_tap_lfr:
-                 col_tap_lfr = next((c for c in df_lfr.columns if 'TAP' in c.upper()), None)
+            print(f"   ℹ️ Mapping : IXFMR2[{col_link_bus}] -> LFR[{col_id_from}] -> Tap[{col_tap_lfr}]")
 
-            print(f"   🔍 Colonnes LFR retenues : ID={col_id_lfr}, Tap={col_tap_lfr}")
-
-            if col_id_tx and col_link_bus and col_id_lfr and col_tap_lfr:
+            if col_id_tx and col_link_bus and col_id_from and col_tap_lfr:
                 for tx_id in settings.tap_transformers_ids:
+                    # 1. On récupère le nom du Bus dans IXFMR2
                     row_tx = df_tx[df_tx[col_id_tx] == tx_id]
+                    
                     if not row_tx.empty:
                         linked_bus_name = str(row_tx.iloc[0][col_link_bus])
-                        row_lfr = df_lfr[df_lfr[col_id_lfr] == linked_bus_name]
-                        if not row_lfr.empty:
+                        print(f"   -> Transfo {tx_id} lié au Bus '{linked_bus_name}'")
+                        
+                        # 2. On cherche ce bus UNIQUEMENT dans IDFrom de LFR
+                        target_row = df_lfr[df_lfr[col_id_from] == linked_bus_name]
+                        
+                        if not target_row.empty:
                             try:
-                                raw_tap = row_lfr.iloc[0][col_tap_lfr]
+                                raw_tap = target_row.iloc[0][col_tap_lfr]
                                 val_tap = float(str(raw_tap).replace(',', '.'))
                                 res["taps"][tx_id] = val_tap
-                                print(f"      ✅ OK: {tx_id} -> Bus {linked_bus_name} -> Tap {val_tap}")
-                            except:
+                                print(f"      ✅ Tap trouvé (via IDFrom) : {val_tap}")
+                            except Exception as e:
+                                print(f"      ❌ Erreur valeur Tap : {e}")
                                 res["taps"][tx_id] = None
                         else:
-                            print(f"      ⚠️ Bus {linked_bus_name} non trouvé dans LFR")
+                            print(f"      ⚠️ Bus '{linked_bus_name}' introuvable dans la colonne IDFrom de LFR.")
                             res["taps"][tx_id] = None
+                    else:
+                        print(f"   ⚠️ Transfo {tx_id} inconnu dans IXFMR2.")
             else:
-                print("❌ Manque colonne ID ou TAP dans LFR.")
+                print("❌ Colonnes manquantes (IDFrom ou Tap absents).")
 
-        # --- C. ANALYSE ---
+        # --- 4. CALCUL DELTA ---
         if res["mw_flow"] is not None:
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
+            
             if delta <= tol: res["status_color"] = "green"
             elif delta <= (tol * 2): res["status_color"] = "orange"
             else: res["status_color"] = "red"
+            
             current_is_valid = delta <= tol
+            
             if best_file is None:
                 best_file = filename
                 min_delta = delta
