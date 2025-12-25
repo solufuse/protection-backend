@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse, JSONResponse
-from typing import Optional, List, Dict
+from typing import Optional
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
@@ -34,12 +34,12 @@ def get_merged_dataframes_for_calc(token: str):
     return final
 
 def _execute_calculation_logic(config: ProjectConfig, token: str):
+    # On a TOUJOURS besoin des fichiers réseaux (.si2s) de la session
     dfs_dict = get_merged_dataframes_for_calc(token)
     
-    # Note: Si dfs_dict est vide, topology_manager peut gérer ou lever une erreur.
-    # On laisse passer pour l'instant au cas où config suffit.
-    
+    # topology_manager gère si dfs_dict est vide (mode simulation pure config)
     config_updated = topology_manager.resolve_all(config, dfs_dict)
+    
     return {
         "status": "success",
         "engine": "Protection Coordination (PC)",
@@ -64,42 +64,52 @@ def get_config_from_session(token: str) -> ProjectConfig:
         raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé en session.")
 
     try:
-        # CORRECTION : Décodage
         if isinstance(target_content, bytes):
             text_content = target_content.decode('utf-8')
         else:
-            text_content = target_content
-            
+            text_content = target_content  
         data = json.loads(text_content)
         return ProjectConfig(**data)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Config JSON invalide : {e}")
+        raise HTTPException(status_code=422, detail=f"Config JSON Session invalide : {e}")
 
-# --- ROUTES ---
-
-@router.post("/run-json")
-async def run_study_manual(config: ProjectConfig, token: str = Depends(get_current_token)):
-    """
-    ✅ MÉTHODE MANUELLE
-    Envoyez la config dans le Body.
-    """
-    return _execute_calculation_logic(config, token)
-
+# --- 1. VIA SESSION DATA ---
 @router.post("/run")
-async def run_study_auto(token: str = Depends(get_current_token)):
+async def run_via_session(token: str = Depends(get_current_token)):
     """
-    ✅ MÉTHODE AUTO (SESSION)
-    Utilise le 'config.json' et les fichiers réseaux (.si2s/.lf1s) en mémoire.
+    Utilise le 'config.json' et les fichiers réseaux (.si2s) en Session RAM.
     """
     config = get_config_from_session(token)
     return _execute_calculation_logic(config, token)
 
-# --- (Data Explorer inchangé, on ne le remet pas pour alléger le script) ---
-# Mais il faut réimporter les routes explorer si on veut garder la fonctionnalité.
-# Pour faire simple ici, on remet juste la route explorer minimale pour ne pas casser le fichier
-# ---------------------------------------------------------------------------------
+# --- 2. VIA JSON BODY ---
+@router.post("/run-json")
+async def run_via_json(config: ProjectConfig, token: str = Depends(get_current_token)):
+    """
+    Utilise la config envoyée dans le Body + les fichiers réseaux (.si2s) en Session.
+    """
+    return _execute_calculation_logic(config, token)
+
+# --- 3. VIA FILE UPLOAD ---
+@router.post("/run-config")
+async def run_via_file_upload(
+    file: UploadFile = File(...), 
+    token: str = Depends(get_current_token)
+):
+    """
+    Utilise le fichier config uploadé ici + les fichiers réseaux (.si2s) en Session.
+    """
+    content = await file.read()
+    try: 
+        text_content = content.decode('utf-8')
+        valid_config = ProjectConfig(**json.loads(text_content))
+    except Exception as e: 
+        raise HTTPException(status_code=422, detail=f"Fichier config invalide: {e}")
+        
+    return _execute_calculation_logic(valid_config, token)
+
+# --- Data Explorer (Minimal pour éviter de casser le fichier) ---
 def _collect_explorer_data(token, table_search, filename_filter):
-    # (Version simplifiée pour réécriture)
     files = session_manager.get_files(token)
     if not files: return {}
     results = {}
@@ -122,8 +132,7 @@ def explore_si2s_data(
     token: str = Depends(get_current_token)
 ):
     raw_data = _collect_explorer_data(token, table_search, filename)
-    if not raw_data: raise HTTPException(status_code=404, detail="No data.")
-    
+    if not raw_data: raise HTTPException(status_code=404, detail="No data found.")
     preview_data = {}
     for fname, tables in raw_data.items():
         preview_data[fname] = {}
