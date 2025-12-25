@@ -12,9 +12,7 @@ import zipfile
 router = APIRouter(prefix="/loadflow", tags=["Loadflow Analysis"])
 
 def get_lf_config_from_session(token: str) -> LoadflowSettings:
-    """
-    Helper: Retrieves and parses 'config.json' from the user's session.
-    """
+    """Helper: Retrieves and parses 'config.json'."""
     files = session_manager.get_files(token)
     if not files: raise HTTPException(status_code=400, detail="Session empty.")
     
@@ -34,11 +32,8 @@ def get_lf_config_from_session(token: str) -> LoadflowSettings:
         return LoadflowSettings(**data["loadflow_settings"])
     except Exception as e: raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
-# --- INTERNAL HELPER FOR EXCEL ---
 def generate_flat_excel(data: dict, filename: str):
-    """
-    Generates a flattened Excel file (one row per transformer) from the analysis results.
-    """
+    """Generates a flattened Excel file (one row per transformer)."""
     results = data.get("results", [])
     flat_rows = []
 
@@ -89,84 +84,41 @@ def generate_flat_excel(data: dict, filename: str):
     output.seek(0)
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
-# --- API ROUTES ---
-
 @router.post("/run", response_model=LoadflowResponse)
 async def run_loadflow_session(token: str = Depends(get_current_token)):
-    """
-    Run Loadflow Analysis on ALL files in the current session.
-    
-    Returns:
-        JSON object containing detailed results for every file (Winners and Losers).
-    """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     return loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
 
 @router.post("/run-win", response_model=LoadflowResponse)
 async def run_loadflow_winners_only(token: str = Depends(get_current_token)):
-    """
-    Run Loadflow Analysis and return ONLY the winning files.
-    
-    Returns:
-        JSON object containing only the best file for each scenario group (Study ID + Config).
-    """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     return loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
 
 @router.get("/export")
-async def export_all_files(
-    format: str = Query("xlsx", regex="^(xlsx|json)$", description="Output format: 'xlsx' or 'json'"),
-    token: str = Depends(get_current_token)
-):
-    """
-    Download a global report of ALL files (Winners and Losers).
-    
-    - **xlsx**: Returns a flattened Excel table (one row per transformer).
-    - **json**: Returns the full JSON response file.
-    """
+async def export_all_files(format: str = Query("xlsx", regex="^(xlsx|json)$"), token: str = Depends(get_current_token)):
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
-    
-    if format == "json":
-        return JSONResponse(content=data, headers={"Content-Disposition": "attachment; filename=loadflow_export_all.json"})
+    if format == "json": return JSONResponse(content=data, headers={"Content-Disposition": "attachment; filename=loadflow_export_all.json"})
     return generate_flat_excel(data, "loadflow_export_all.xlsx")
 
 @router.get("/export-win")
-async def export_winners_flat(
-    format: str = Query("xlsx", regex="^(xlsx|json)$", description="Output format: 'xlsx' or 'json'"),
-    token: str = Depends(get_current_token)
-):
-    """
-    Download a report of ONLY the WINNING files.
-    
-    - **xlsx**: Returns a flattened Excel table (one row per transformer).
-    - **json**: Returns the filtered JSON response file.
-    """
+async def export_winners_flat(format: str = Query("xlsx", regex="^(xlsx|json)$"), token: str = Depends(get_current_token)):
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     data = loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
-    
-    if format == "json":
-        return JSONResponse(content=data, headers={"Content-Disposition": "attachment; filename=loadflow_export_winners.json"})
+    if format == "json": return JSONResponse(content=data, headers={"Content-Disposition": "attachment; filename=loadflow_export_winners.json"})
     return generate_flat_excel(data, "loadflow_export_winners.xlsx")
 
 @router.get("/export-l1fs")
 async def export_winners_l1fs(token: str = Depends(get_current_token)):
-    """
-    Download a ZIP archive containing the source files (.LF1S) of the winners.
-    
-    Useful to retrieve the best configuration files directly.
-    """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     analysis = loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
     winners = analysis.get("results", [])
-    
     if not winners: raise HTTPException(status_code=404, detail="No winners found.")
-
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for win in winners:
@@ -175,6 +127,5 @@ async def export_winners_l1fs(token: str = Depends(get_current_token)):
                 content = files[fname]
                 if isinstance(content, (dict, list)): content = json.dumps(content, indent=2)
                 zip_file.writestr(fname, content)
-
     zip_buffer.seek(0)
     return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=loadflow_winners_source.zip"})
