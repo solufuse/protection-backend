@@ -3,8 +3,11 @@ import math
 from app.calculations import si2s_converter
 from app.schemas.loadflow_schema import TransformerData, SwingBusInfo
 
-def analyze_loadflow(files_content: dict, settings) -> dict:
-    print("🚀 DÉBUT ANALYSE (HIGHLIGHT WINNER)")
+def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
+    """
+    only_winners: Si True, ne renvoie que les fichiers gagnants dans la liste 'results'.
+    """
+    print(f"🚀 DÉBUT ANALYSE (Only Winners: {only_winners})")
     results = []
     
     target = settings.target_mw
@@ -12,13 +15,13 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
     best_file = None
     min_delta = float('inf')
 
-    # --- 1. TRAITEMENT DE CHAQUE FICHIER ---
+    # --- 1. TRAITEMENT ---
     for filename, content in files_content.items():
         ext = filename.lower()
         if not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
             continue
 
-        print(f"\n📂 Analyse : {filename}")
+        # print(f"\n📂 Analyse : {filename}")
 
         res = {
             "filename": filename,
@@ -36,8 +39,7 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
             dfs = si2s_converter.extract_data_from_si2s(content)
             if dfs and "data" in dfs and isinstance(dfs["data"], dict):
                 dfs = dfs["data"]
-        except Exception as e:
-            print(f"❌ Erreur lecture : {e}")
+        except:
             dfs = None
             
         if not dfs:
@@ -65,25 +67,20 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
         target_bus_id = settings.swing_bus_id
         if df_lfr is not None:
             col_id_any = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'IDFROM']), None)
-            
             if not target_bus_id and col_id_any:
                 col_type = next((c for c in df_lfr.columns if 'TYPE' in c.upper()), None)
                 if col_type:
                     swing_rows = df_lfr[df_lfr[col_type].astype(str).str.upper().str.contains('SWNG|SWING')]
-                    if not swing_rows.empty:
-                        target_bus_id = str(swing_rows.iloc[0][col_id_any])
-            
+                    if not swing_rows.empty: target_bus_id = str(swing_rows.iloc[0][col_id_any])
             res["swing_bus_found"]["script"] = target_bus_id
 
             if target_bus_id:
                 col_mw = next((c for c in df_lfr.columns if c.upper() in ['LFMW', 'MW', 'MWLOADING', 'P (MW)']), None)
                 col_mvar = next((c for c in df_lfr.columns if c.upper() in ['LFMVAR', 'MVAR', 'Q (MVAR)']), None)
                 cols_search = [c for c in df_lfr.columns if c.upper() in ['ID', 'IDFROM', 'IDTO']]
-                
                 mask = pd.Series(False, index=df_lfr.index)
                 for c in cols_search: mask |= (df_lfr[c] == target_bus_id)
                 rows = df_lfr[mask]
-                
                 if not rows.empty:
                     row = rows.iloc[0]
                     if col_mw:
@@ -98,7 +95,6 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
             col_id_tx = next((c for c in df_tx.columns if c.upper() in ['ID', 'DEVICE ID']), None)
             col_from = next((c for c in df_tx.columns if c.upper() in ['FROMBUS', 'FROMID', 'FROMTO']), None)
             col_to = next((c for c in df_tx.columns if c.upper() in ['TOBUS', 'TOID', 'IDTO']), None)
-            
             col_lfr_from = next((c for c in df_lfr.columns if c.upper() == 'IDFROM'), None)
             col_lfr_to = next((c for c in df_lfr.columns if c.upper() == 'IDTO'), None)
             
@@ -115,11 +111,9 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                     tx_id = str(row_tx[col_id_tx])
                     bus_from = str(row_tx[col_from])
                     bus_to = str(row_tx[col_to])
-                    
                     mask_normal = (df_lfr[col_lfr_from] == bus_from) & (df_lfr[col_lfr_to] == bus_to)
                     mask_reverse = (df_lfr[col_lfr_from] == bus_to) & (df_lfr[col_lfr_to] == bus_from)
                     matches = df_lfr[mask_normal | mask_reverse]
-                    
                     if not matches.empty:
                         selected_row = matches.iloc[0]
                         if col_tap:
@@ -129,7 +123,6 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                                         selected_row = r
                                         break
                                 except: pass
-                        
                         data = TransformerData()
                         try:
                             if col_tap: data.tap = float(str(selected_row[col_tap]).replace(',', '.'))
@@ -142,7 +135,7 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                         except: pass
                         res["transformers"][tx_id] = data
 
-        # --- CALCUL WINNER ---
+        # --- WINNER CALC ---
         if res["mw_flow"] is not None:
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
@@ -164,22 +157,25 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                     if delta < min_delta:
                         min_delta = delta
                         best_file = filename
-
         results.append(res)
 
-    # --- 2. FINALISATION & HIGHLIGHT ---
+    # --- FINALISATION ---
     final_best_result = None
-    
     if best_file:
         for r in results:
             if r["filename"] == best_file:
                 r["is_winner"] = True
-                final_best_result = r  # On capture l'objet complet
+                final_best_result = r
                 break
+    
+    # --- FILTRAGE OPTIONNEL (POUR /run-win) ---
+    if only_winners:
+        # On ne garde que ceux qui sont marqués comme vainqueurs
+        results = [r for r in results if r.get("is_winner") is True]
 
     return {
         "status": "success",
         "best_file": best_file,
-        "best_result": final_best_result, # <--- ICI LE TRUC QUE TU VEUX
+        "best_result": final_best_result,
         "results": results
     }
