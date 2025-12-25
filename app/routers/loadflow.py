@@ -55,92 +55,117 @@ async def export_winners(
     token: str = Depends(get_current_token)
 ):
     """
-    Télécharge les résultats gagnants.
-    - format=xlsx : Fichier Excel (Resume + Details)
-    - format=json : Fichier JSON
+    Export UNIQUEMENT les gagnants (Structure: 2 onglets Resume/Details).
     """
-    # 1. Calcul des résultats (Gagnants uniquement)
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     data = loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
     
-    results = data.get("results", [])
-
-    # --- CAS 1 : JSON ---
     if format == "json":
-        # On renvoie le JSON en tant que fichier téléchargeable
+        return JSONResponse(content=data, headers={"Content-Disposition": "attachment; filename=winners.json"})
+
+    # Excel Logic (2 onglets)
+    results = data.get("results", [])
+    summary_rows = []
+    transfo_rows = []
+    for res in results:
+        fname = res["filename"]
+        summary_rows.append({
+            "Fichier": fname, "MW Flow": res.get("mw_flow"), "Mvar Flow": res.get("mvar_flow"),
+            "Delta": res.get("delta_target"), "Swing": res.get("swing_bus_found", {}).get("script")
+        })
+        for tx_id, tx_data in res.get("transformers", {}).items():
+            transfo_rows.append({
+                "Fichier": fname, "ID": tx_id, "Tap": getattr(tx_data, "tap", None),
+                "MW": getattr(tx_data, "mw", None), "Mvar": getattr(tx_data, "mvar", None),
+                "Amp": getattr(tx_data, "amp", None), "kV": getattr(tx_data, "kv", None)
+            })
+            
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        pd.DataFrame(summary_rows).to_excel(writer, sheet_name="Resume", index=False)
+        pd.DataFrame(transfo_rows).to_excel(writer, sheet_name="Details", index=False)
+    output.seek(0)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=winners.xlsx"})
+
+
+@router.get("/export")
+async def export_all_files(
+    format: str = Query("xlsx", regex="^(xlsx|json)$"),
+    token: str = Depends(get_current_token)
+):
+    """
+    Export TOUT (Gagnants et Perdants) dans un SEUL tableau unifié.
+    """
+    config = get_lf_config_from_session(token)
+    files = session_manager.get_files(token)
+    # On récupère TOUS les fichiers (only_winners=False)
+    data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
+    
+    if format == "json":
         return JSONResponse(
             content=data,
-            headers={"Content-Disposition": "attachment; filename=loadflow_winners.json"}
+            headers={"Content-Disposition": "attachment; filename=loadflow_full_export.json"}
         )
 
-    # --- CAS 2 : EXCEL ---
-    elif format == "xlsx":
-        # A. Préparation des données pour Pandas
-        summary_rows = []
-        transfo_rows = []
+    # --- FLATTEN LOGIC (Tout dans un seul tableau) ---
+    results = data.get("results", [])
+    flat_rows = []
 
-        for res in results:
-            fname = res["filename"]
-            
-            # Onglet 1 : Résumé
-            summary_rows.append({
-                "Fichier": fname,
-                "MW Flow": res.get("mw_flow"),
-                "Mvar Flow": res.get("mvar_flow"),
-                "Delta Cible": res.get("delta_target"),
-                "Swing Bus (Config)": res.get("swing_bus_found", {}).get("config"),
-                "Swing Bus (Detecté)": res.get("swing_bus_found", {}).get("script"),
-            })
-
-            # Onglet 2 : Détails Transfos
-            transformers = res.get("transformers", {})
+    for res in results:
+        # Infos communes au fichier
+        base_info = {
+            "Fichier": res["filename"],
+            "Status": "Gagnant" if res.get("is_winner") else "Non retenu",
+            "MW Flow Global": res.get("mw_flow"),
+            "Mvar Flow Global": res.get("mvar_flow"),
+            "Ecart Cible": res.get("delta_target"),
+            "Swing Bus": res.get("swing_bus_found", {}).get("script"),
+        }
+        
+        transformers = res.get("transformers", {})
+        
+        # Si aucun transfo trouvé, on ajoute quand même une ligne pour le fichier
+        if not transformers:
+            row = base_info.copy()
+            row["Info"] = "Aucun transfo trouvé"
+            flat_rows.append(row)
+        else:
+            # Une ligne par transformateur
             for tx_id, tx_data in transformers.items():
-                # tx_data est un objet Pydantic, on le convertit en dict
-                # Note: Dans le dict retourné par calculator, c'est peut-être déjà un objet ou un dict selon l'étape
-                # Le calculator renvoie des objets Pydantic dans 'transformers'
+                row = base_info.copy()
                 
-                # Accès attributs (compatible Pydantic v1/v2 ou dict)
-                tap = getattr(tx_data, "tap", None)
-                mw = getattr(tx_data, "mw", None)
-                mvar = getattr(tx_data, "mvar", None)
-                amp = getattr(tx_data, "amp", None)
-                kv = getattr(tx_data, "kv", None)
-                pf = getattr(tx_data, "pf", None)
-
-                transfo_rows.append({
-                    "Fichier Source": fname,
+                # Ajout des données du transfo
+                row.update({
                     "Transfo ID": tx_id,
-                    "Tap": tap,
-                    "MW": mw,
-                    "Mvar": mvar,
-                    "Amp (A)": amp,
-                    "Tension (kV)": kv,
-                    "Power Factor": pf
+                    "Tap": getattr(tx_data, "tap", None),
+                    "MW (Tx)": getattr(tx_data, "mw", None),
+                    "Mvar (Tx)": getattr(tx_data, "mvar", None),
+                    "Amp (A)": getattr(tx_data, "amp", None),
+                    "Tension (kV)": getattr(tx_data, "kv", None),
+                    "Volt Mag": getattr(tx_data, "volt_mag", None),
+                    "Power Factor": getattr(tx_data, "pf", None)
                 })
+                flat_rows.append(row)
 
-        # B. Création des DataFrames
-        df_summary = pd.DataFrame(summary_rows)
-        df_transfos = pd.DataFrame(transfo_rows)
+    # Création du DataFrame unique
+    df_final = pd.DataFrame(flat_rows)
+    
+    # Export Excel
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_final.to_excel(writer, sheet_name="Resultats_Complets", index=False)
+        
+        # Auto-width
+        for column in writer.sheets["Resultats_Complets"].columns:
+            try:
+                writer.sheets["Resultats_Complets"].column_dimensions[column[0].column_letter].width = 18
+            except: pass
 
-        # C. Écriture dans un buffer binaire
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df_summary.to_excel(writer, sheet_name="Gagnants_Resume", index=False)
-            df_transfos.to_excel(writer, sheet_name="Details_Transfos", index=False)
-            
-            # Petit ajustement esthétique des largeurs de colonnes (Auto-width basique)
-            for sheet in writer.sheets.values():
-                for column in sheet.columns:
-                    try:
-                        sheet.column_dimensions[column[0].column_letter].width = 20
-                    except: pass
-
-        output.seek(0)
-
-        # D. Renvoi du fichier
-        return StreamingResponse(
-            output, 
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=loadflow_winners.xlsx"}
-        )
+    output.seek(0)
+    
+    return StreamingResponse(
+        output, 
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=loadflow_full_export.xlsx"}
+    )
