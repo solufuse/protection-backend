@@ -6,22 +6,7 @@ from app.schemas.loadflow_schema import TransformerData, SwingBusInfo, StudyCase
 
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
     """
-    Core logic for Loadflow Analysis.
-
-    Process:
-    1. Parse each file (SQLite/JSON extraction).
-    2. Identify Study Case metadata (ID, Config) to group files by scenario.
-    3. Extract Swing Bus flows (MW, Mvar).
-    4. Extract Transformer data (Taps, Amps, etc.) by mapping IXFMR2 (topology) to LFR (results).
-    5. Determine the 'Winner' for each scenario group based on Target MW and Tolerance.
-
-    Args:
-        files_content (dict): Dictionary {filename: content_bytes/string}.
-        settings (LoadflowSettings): Target MW, Tolerance, etc.
-        only_winners (bool): If True, filters the output list to return only winning files.
-
-    Returns:
-        dict: A dictionary matching the LoadflowResponse schema.
+    Core logic for Loadflow Analysis (Silent Mode).
     """
     print(f"🚀 START ANALYSIS (Multi-Scenario Strategy)")
     results = []
@@ -30,16 +15,20 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
     tol = settings.tolerance_mw
     
     # Dictionary to track the champion for each scenario group.
-    # Key: (StudyID, Config) -> Value: {filename, delta, valid, reason}
     champions = {}
+    
+    count_files = 0
 
     for filename, content in files_content.items():
         clean_name = os.path.basename(filename)
         ext = clean_name.lower()
         
-        # Skip temporary files or unsupported extensions
+        # Skip temporary files
         if clean_name.startswith('~$') or not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
             continue
+
+        count_files += 1
+        # REMOVED: print(f"📂 Analyse : {filename}") -> To avoid spam
 
         res = {
             "filename": filename,
@@ -58,7 +47,6 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         # --- 1. DATA EXTRACTION ---
         try:
             dfs = si2s_converter.extract_data_from_si2s(content)
-            # Handle nested 'data' wrapper if present (common in JSON dumps)
             if dfs and "data" in dfs and isinstance(dfs["data"], dict): dfs = dfs["data"]
         except: dfs = None
             
@@ -95,12 +83,11 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         if df_lfr is not None: df_lfr.columns = [str(c).strip() for c in df_lfr.columns]
         if df_tx is not None: df_tx.columns = [str(c).strip() for c in df_tx.columns]
 
-        # --- 4. SWING BUS FLOW (MW/MVAR) ---
+        # --- 4. SWING BUS FLOW ---
         target_bus_id = settings.swing_bus_id
         if df_lfr is not None:
             col_id_any = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'IDFROM']), None)
             
-            # Auto-detect Swing Bus if not provided in config
             if not target_bus_id and col_id_any:
                 col_type = next((c for c in df_lfr.columns if 'TYPE' in c.upper()), None)
                 if col_type:
@@ -112,7 +99,6 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                 col_mw = next((c for c in df_lfr.columns if c.upper() in ['LFMW', 'MW', 'MWLOADING', 'P (MW)']), None)
                 col_mvar = next((c for c in df_lfr.columns if c.upper() in ['LFMVAR', 'MVAR']), None)
                 cols_search = [c for c in df_lfr.columns if c.upper() in ['ID', 'IDFROM', 'IDTO']]
-                
                 mask = pd.Series(False, index=df_lfr.index)
                 for c in cols_search: mask |= (df_lfr[c] == target_bus_id)
                 rows = df_lfr[mask]
@@ -125,7 +111,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                         try: res["mvar_flow"] = float(str(row[col_mvar]).replace(',', '.'))
                         except: pass
 
-        # --- 5. TRANSFORMERS DATA EXTRACTION ---
+        # --- 5. TRANSFORMERS ---
         if df_tx is not None and df_lfr is not None:
             col_id_tx = next((c for c in df_tx.columns if c.upper() in ['ID', 'DEVICE ID']), None)
             col_from = next((c for c in df_tx.columns if c.upper() in ['FROMBUS', 'FROMID', 'FROMTO']), None)
@@ -145,11 +131,9 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                     tx_id = str(row_tx[col_id_tx])
                     bus_from = str(row_tx[col_from])
                     bus_to = str(row_tx[col_to])
-                    
                     mask_normal = (df_lfr[col_lfr_from] == bus_from) & (df_lfr[col_lfr_to] == bus_to)
                     mask_reverse = (df_lfr[col_lfr_from] == bus_to) & (df_lfr[col_lfr_to] == bus_from)
                     matches = df_lfr[mask_normal | mask_reverse]
-                    
                     if not matches.empty:
                         selected_row = matches.iloc[0]
                         if col_tap:
@@ -158,7 +142,6 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                                     if float(str(r[col_tap]).replace(',', '.')) != 0:
                                         selected_row = r; break
                                 except: pass
-                        
                         data = TransformerData()
                         try:
                             if col_tap: data.tap = float(str(selected_row[col_tap]).replace(',', '.'))
@@ -171,7 +154,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                         except: pass
                         res["transformers"][tx_id] = data
 
-        # --- 6. BATTLE LOGIC (Per Scenario Group) ---
+        # --- 6. BATTLE LOGIC ---
         if res["mw_flow"] is not None:
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
@@ -181,24 +164,18 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             elif delta <= (tol * 2): res["status_color"] = "orange"
             else: res["status_color"] = "red"
             
-            # Identify the group key: (StudyID, Config)
             group_key = (study_id, study_cfg)
-            
-            # Retrieve current champion for this group
             current_champ = champions.get(group_key)
-            
             is_new_king = False
             reason = ""
             
             if current_champ is None:
-                is_new_king = True; reason = "First candidate of the group"
+                is_new_king = True; reason = "First candidate"
             else:
                 champ_valid = current_champ["valid"]
                 champ_delta = current_champ["delta"]
-                
-                # Logic: Validity > Precision > Proximity
                 if candidate_is_valid and not champ_valid:
-                    is_new_king = True; reason = "Validity (Green beats Red)"
+                    is_new_king = True; reason = "Validity"
                 elif candidate_is_valid and champ_valid:
                     if delta < champ_delta:
                         is_new_king = True; reason = f"Precision ({delta} < {champ_delta})"
@@ -213,27 +190,29 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                     "valid": candidate_is_valid,
                     "reason": reason
                 }
-                print(f"   👑 NEW KING [{study_id}/{study_cfg}] : {filename} | {reason}")
+                # REMOVED: print(f"   👑 NEW KING...") -> To avoid spam
 
         results.append(res)
 
-    # --- 7. FINALIZE WINNERS ---
-    # Mark files as winners based on the champions dict
+    # --- 7. FINALIZE ---
+    win_count = 0
     for r in results:
         s_id = r["study_case"]["id"]
         s_cfg = r["study_case"]["config"]
         group_key = (s_id, s_cfg)
-        
         champ = champions.get(group_key)
         if champ and champ["filename"] == r["filename"]:
             r["is_winner"] = True
             r["victory_reason"] = champ["reason"]
+            win_count += 1
     
+    print(f"✅ ANALYSIS COMPLETE. Processed {count_files} files. Found {win_count} winners.")
+
     if only_winners:
         results = [r for r in results if r.get("is_winner") is True]
 
     return {
         "status": "success",
-        "best_file": None, # Deprecated in multi-scenario context
+        "best_file": None,
         "results": results
     }
