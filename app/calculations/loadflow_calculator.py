@@ -3,7 +3,7 @@ import math
 from app.calculations import si2s_converter
 
 def analyze_loadflow(files_content: dict, settings) -> dict:
-    print("🚀 DÉBUT ANALYSE LOADFLOW (AUTO-SCAN TOUS TRANSFOS)")
+    print("🚀 DÉBUT ANALYSE LOADFLOW (SMART STRUCTURE)")
     results = []
     
     target = settings.target_mw
@@ -13,7 +13,7 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
 
     for filename, content in files_content.items():
         ext = filename.lower()
-        if not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb')):
+        if not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
             continue
 
         print(f"\n📂 Traitement fichier : {filename}")
@@ -31,9 +31,18 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
         }
 
         try:
+            # 1. Extraction des données brutes
             dfs = si2s_converter.extract_data_from_si2s(content)
+            
+            # 2. GESTION DU WRAPPER "DATA" (CORRECTION CRUCIALE)
+            # Si le résultat contient une clé "data" qui contient les tables, on descend d'un niveau.
+            if dfs and "data" in dfs and isinstance(dfs["data"], dict):
+                print("   ℹ️ Structure imbriquée détectée (clé 'data'), on descend d'un niveau.")
+                # On fusionne pour avoir accès direct aux tables
+                dfs = dfs["data"]
+            
         except Exception as e:
-            print(f"❌ Erreur lecture SQLite : {e}")
+            print(f"❌ Erreur lecture données : {e}")
             dfs = None
             
         if not dfs:
@@ -42,26 +51,39 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
             
         res["is_valid"] = True
         
-        # --- 1. RECUPERATION TABLES ---
+        # --- 3. RECUPERATION DES TABLES ---
         df_lfr = None
         for k in dfs.keys():
             if k.upper() in ['LFR', 'BUSLOADSUMMARY', 'SUMMARY']:
-                df_lfr = dfs[k]
+                # Conversion en DataFrame si ce n'est pas déjà le cas (cas du JSON list)
+                if isinstance(dfs[k], list):
+                    df_lfr = pd.DataFrame(dfs[k])
+                else:
+                    df_lfr = dfs[k]
                 break
         
         df_tx = None
         for k in dfs.keys():
             if 'IXFMR2' in k.upper():
-                df_tx = dfs[k]
+                if isinstance(dfs[k], list):
+                    df_tx = pd.DataFrame(dfs[k])
+                else:
+                    df_tx = dfs[k]
                 break
         
+        # Nettoyage des noms de colonnes
         if df_lfr is not None: df_lfr.columns = [str(c).strip() for c in df_lfr.columns]
         if df_tx is not None: df_tx.columns = [str(c).strip() for c in df_tx.columns]
 
-        # --- 2. LECTURE CIBLE MW (Inchangé) ---
+        # Debug si tables manquantes
+        if df_lfr is None: print(f"   ⚠️ Table LFR introuvable. Clés dispo: {list(dfs.keys())}")
+        if df_tx is None: print(f"   ⚠️ Table IXFMR2 introuvable.")
+
+        # --- 4. LECTURE CIBLE MW ---
         target_bus_id = settings.swing_bus_id
         if df_lfr is not None:
             col_id_any = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'IDFROM', 'IDTO']), None)
+            
             if not target_bus_id and col_id_any:
                 col_type = next((c for c in df_lfr.columns if 'TYPE' in c.upper()), None)
                 if col_type:
@@ -82,10 +104,9 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                         try: res["mw_flow"] = float(str(rows.iloc[0][col_mw]).replace(',', '.'))
                         except: pass
 
-        # --- 3. AUTO-SCAN DE TOUS LES TRANSFOS ---
+        # --- 5. AUTO-SCAN DES TRANSFOS ---
         if df_tx is not None and df_lfr is not None:
             
-            # Identifions les colonnes une fois pour toutes
             col_id_tx = next((c for c in df_tx.columns if c.upper() in ['ID', 'DEVICE ID']), None)
             col_from_bus_tx = next((c for c in df_tx.columns if c.upper() in ['FROMBUS', 'FROMID', 'FROMTO', 'IDFROM']), None)
             col_to_bus_tx = next((c for c in df_tx.columns if c.upper() in ['TOBUS', 'TOID', 'IDTO']), None)
@@ -94,17 +115,17 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
             col_id_to_lfr = next((c for c in df_lfr.columns if c.upper() == 'IDTO'), None)
             col_tap_lfr = next((c for c in df_lfr.columns if c.upper() == 'TAP'), None)
 
+            # Debug des colonnes trouvées
+            # print(f"   ℹ️ Colonnes: IXFMR2(ID={col_id_tx}, From={col_from_bus_tx}, To={col_to_bus_tx}) | LFR(From={col_id_from_lfr}, To={col_id_to_lfr}, Tap={col_tap_lfr})")
+
             if col_id_tx and col_from_bus_tx and col_to_bus_tx and col_id_from_lfr and col_id_to_lfr and col_tap_lfr:
                 
-                # ON BOUCLE SUR CHAQUE LIGNE DE LA TABLE TRANSFO
                 for index, row_tx in df_tx.iterrows():
-                    
-                    # 1. Extraction ID et Bus
                     tx_id = str(row_tx[col_id_tx])
                     bus_from = str(row_tx[col_from_bus_tx])
                     bus_to = str(row_tx[col_to_bus_tx])
                     
-                    # 2. Recherche dans LFR (Double Match)
+                    # Double Match dans LFR
                     mask_normal = (df_lfr[col_id_from_lfr] == bus_from) & (df_lfr[col_id_to_lfr] == bus_to)
                     mask_reverse = (df_lfr[col_id_from_lfr] == bus_to) & (df_lfr[col_id_to_lfr] == bus_from)
                     
@@ -112,7 +133,7 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                     
                     if not target_rows.empty:
                         found_val = None
-                        # Priorité aux Taps non nuls
+                        # Priorité Tap != 0
                         for idx_lfr, r_lfr in target_rows.iterrows():
                             try:
                                 val = float(str(r_lfr[col_tap_lfr]).replace(',', '.'))
@@ -121,21 +142,19 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                                     break
                             except: pass
                         
-                        # Sinon 0
                         if found_val is None:
                             try: found_val = float(str(target_rows.iloc[0][col_tap_lfr]).replace(',', '.'))
                             except: found_val = 0
                             
-                        # Sauvegarde
                         res["taps"][tx_id] = found_val
-                        # print(f"   🔹 Trouvé : {tx_id} -> Tap {found_val}")
+                        # print(f"      ✅ {tx_id}: Tap {found_val}")
                     else:
-                        # Cas rare : Transfo existe mais pas dans le Loadflow (déconnecté ?)
                         res["taps"][tx_id] = None
             else:
-                print("❌ Colonnes manquantes pour le scan automatique.")
+                print("❌ Colonnes manquantes dans IXFMR2 ou LFR.")
+                if not col_tap_lfr and df_lfr is not None: print(f"   Colonnes LFR dispo: {list(df_lfr.columns)}")
 
-        # --- 4. ANALYSE (Couleur / Winner) ---
+        # --- 6. RESULTATS ---
         if res["mw_flow"] is not None:
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
