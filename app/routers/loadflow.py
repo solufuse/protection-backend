@@ -47,6 +47,9 @@ async def export_all_files(
     format: str = Query("xlsx", regex="^(xlsx|json)$"),
     token: str = Depends(get_current_token)
 ):
+    """
+    Export TOUT dans un tableau unique.
+    """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
@@ -62,7 +65,7 @@ async def export_all_files(
         base_info = {
             "Fichier": res["filename"],
             "Status": "Gagnant" if res.get("is_winner") else "Non retenu",
-            "Raison Victoire": res.get("victory_reason"), # <--- NOUVELLE COLONNE
+            "Raison Victoire": res.get("victory_reason"),
             "MW Flow": res.get("mw_flow"),
             "Mvar Flow": res.get("mvar_flow"),
             "Ecart Cible": res.get("delta_target"),
@@ -82,22 +85,24 @@ async def export_all_files(
                     "Mvar (Tx)": getattr(tx_data, "mvar", None),
                     "Amp (A)": getattr(tx_data, "amp", None),
                     "Tension (kV)": getattr(tx_data, "kv", None),
+                    "Volt Mag": getattr(tx_data, "volt_mag", None),
                     "PF": getattr(tx_data, "pf", None)
                 })
                 flat_rows.append(row)
 
     df_final = pd.DataFrame(flat_rows)
     
-    # Colonnes prioritaires
+    # Ordre des colonnes
     cols = ["Fichier", "Status", "Raison Victoire", "MW Flow", "Ecart Cible"]
     other_cols = [c for c in df_final.columns if c not in cols]
-    df_final = df_final[cols + other_cols]
+    if not df_final.empty:
+        df_final = df_final[cols + other_cols]
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_final.to_excel(writer, sheet_name="Resultats", index=False)
         for col in writer.sheets["Resultats"].columns:
-            try: writer.sheets["Resultats"].column_dimensions[col[0].column_letter].width = 18
+            try: writer.sheets["Resultats"].column_dimensions[col[0].column_letter].width = 20
             except: pass
 
     output.seek(0)
