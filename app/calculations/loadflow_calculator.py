@@ -3,7 +3,7 @@ import math
 from app.calculations import si2s_converter
 
 def analyze_loadflow(files_content: dict, settings) -> dict:
-    print("🚀 DÉBUT ANALYSE LOADFLOW (LOGIQUE DOUBLE MATCH)")
+    print("🚀 DÉBUT ANALYSE LOADFLOW (AUTO-SCAN TOUS TRANSFOS)")
     results = []
     
     target = settings.target_mw
@@ -42,7 +42,7 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
             
         res["is_valid"] = True
         
-        # --- 1. TABLES ---
+        # --- 1. RECUPERATION TABLES ---
         df_lfr = None
         for k in dfs.keys():
             if k.upper() in ['LFR', 'BUSLOADSUMMARY', 'SUMMARY']:
@@ -58,7 +58,7 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
         if df_lfr is not None: df_lfr.columns = [str(c).strip() for c in df_lfr.columns]
         if df_tx is not None: df_tx.columns = [str(c).strip() for c in df_tx.columns]
 
-        # --- 2. MW (CIBLE) ---
+        # --- 2. LECTURE CIBLE MW (Inchangé) ---
         target_bus_id = settings.swing_bus_id
         if df_lfr is not None:
             col_id_any = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'IDFROM', 'IDTO']), None)
@@ -82,75 +82,68 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                         try: res["mw_flow"] = float(str(rows.iloc[0][col_mw]).replace(',', '.'))
                         except: pass
 
-        # --- 3. TAP (DOUBLE MATCH : FROM + TO) ---
-        if df_tx is not None and df_lfr is not None and settings.tap_transformers_ids:
+        # --- 3. AUTO-SCAN DE TOUS LES TRANSFOS ---
+        if df_tx is not None and df_lfr is not None:
             
-            # IXFMR2
+            # Identifions les colonnes une fois pour toutes
             col_id_tx = next((c for c in df_tx.columns if c.upper() in ['ID', 'DEVICE ID']), None)
             col_from_bus_tx = next((c for c in df_tx.columns if c.upper() in ['FROMBUS', 'FROMID', 'FROMTO', 'IDFROM']), None)
             col_to_bus_tx = next((c for c in df_tx.columns if c.upper() in ['TOBUS', 'TOID', 'IDTO']), None)
             
-            # LFR
             col_id_from_lfr = next((c for c in df_lfr.columns if c.upper() == 'IDFROM'), None)
             col_id_to_lfr = next((c for c in df_lfr.columns if c.upper() == 'IDTO'), None)
             col_tap_lfr = next((c for c in df_lfr.columns if c.upper() == 'TAP'), None)
 
             if col_id_tx and col_from_bus_tx and col_to_bus_tx and col_id_from_lfr and col_id_to_lfr and col_tap_lfr:
                 
-                for tx_id in settings.tap_transformers_ids:
-                    # 1. Lire From + To dans IXFMR2
-                    row_tx = df_tx[df_tx[col_id_tx] == tx_id]
+                # ON BOUCLE SUR CHAQUE LIGNE DE LA TABLE TRANSFO
+                for index, row_tx in df_tx.iterrows():
                     
-                    if not row_tx.empty:
-                        bus_from = str(row_tx.iloc[0][col_from_bus_tx])
-                        bus_to = str(row_tx.iloc[0][col_to_bus_tx])
-                        print(f"   -> {tx_id} connecte '{bus_from}' <-> '{bus_to}'")
+                    # 1. Extraction ID et Bus
+                    tx_id = str(row_tx[col_id_tx])
+                    bus_from = str(row_tx[col_from_bus_tx])
+                    bus_to = str(row_tx[col_to_bus_tx])
+                    
+                    # 2. Recherche dans LFR (Double Match)
+                    mask_normal = (df_lfr[col_id_from_lfr] == bus_from) & (df_lfr[col_id_to_lfr] == bus_to)
+                    mask_reverse = (df_lfr[col_id_from_lfr] == bus_to) & (df_lfr[col_id_to_lfr] == bus_from)
+                    
+                    target_rows = df_lfr[mask_normal | mask_reverse]
+                    
+                    if not target_rows.empty:
+                        found_val = None
+                        # Priorité aux Taps non nuls
+                        for idx_lfr, r_lfr in target_rows.iterrows():
+                            try:
+                                val = float(str(r_lfr[col_tap_lfr]).replace(',', '.'))
+                                if val != 0:
+                                    found_val = val
+                                    break
+                            except: pass
                         
-                        # 2. Chercher la paire exacte dans LFR
-                        # Sens normal : IDFrom = bus_from ET IDTo = bus_to
-                        mask_normal = (df_lfr[col_id_from_lfr] == bus_from) & (df_lfr[col_id_to_lfr] == bus_to)
-                        
-                        # Sens inverse : IDFrom = bus_to ET IDTo = bus_from
-                        mask_reverse = (df_lfr[col_id_from_lfr] == bus_to) & (df_lfr[col_id_to_lfr] == bus_from)
-                        
-                        target_rows = df_lfr[mask_normal | mask_reverse]
-                        
-                        # Filtrer les lignes où Tap n'est pas 0 (si possible)
-                        # Souvent, ETAP met Tap=0 sur la ligne "retour" ou "load" et Tap=Value sur la ligne "transfo"
-                        if not target_rows.empty:
-                            found_val = None
+                        # Sinon 0
+                        if found_val is None:
+                            try: found_val = float(str(target_rows.iloc[0][col_tap_lfr]).replace(',', '.'))
+                            except: found_val = 0
                             
-                            # On parcourt les candidats pour trouver celui qui a un Tap != 0
-                            for idx, r in target_rows.iterrows():
-                                try:
-                                    val = float(str(r[col_tap_lfr]).replace(',', '.'))
-                                    if val != 0:
-                                        found_val = val
-                                        break # On a trouvé un tap non nul, c'est le bon !
-                                except: pass
-                            
-                            # Si tous sont 0, on prend 0 quand même
-                            if found_val is None:
-                                try: found_val = float(str(target_rows.iloc[0][col_tap_lfr]).replace(',', '.'))
-                                except: found_val = 0
-                                
-                            res["taps"][tx_id] = found_val
-                            print(f"      ✅ Tap trouvé : {found_val}")
-                        else:
-                            print(f"      ⚠️ Lien '{bus_from}-{bus_to}' introuvable dans LFR.")
-                            res["taps"][tx_id] = None
+                        # Sauvegarde
+                        res["taps"][tx_id] = found_val
+                        # print(f"   🔹 Trouvé : {tx_id} -> Tap {found_val}")
                     else:
-                        print(f"   ⚠️ Transfo {tx_id} inconnu dans IXFMR2.")
+                        # Cas rare : Transfo existe mais pas dans le Loadflow (déconnecté ?)
+                        res["taps"][tx_id] = None
             else:
-                print("❌ Colonnes manquantes pour le double-match.")
+                print("❌ Colonnes manquantes pour le scan automatique.")
 
-        # --- 4. CALCUL DELTA ---
+        # --- 4. ANALYSE (Couleur / Winner) ---
         if res["mw_flow"] is not None:
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
+            
             if delta <= tol: res["status_color"] = "green"
             elif delta <= (tol * 2): res["status_color"] = "orange"
             else: res["status_color"] = "red"
+            
             current_is_valid = delta <= tol
             
             if best_file is None:
