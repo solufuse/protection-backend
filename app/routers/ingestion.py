@@ -6,7 +6,7 @@ from app.calculations import si2s_converter
 import pandas as pd
 import io
 import json
-import zipfile  # <--- Nouvelle librairie standard
+import zipfile
 
 router = APIRouter(prefix="/ingestion", tags=["Ingestion & Export"])
 
@@ -20,13 +20,18 @@ def get_specific_file(token: str, filename: str):
         raise HTTPException(status_code=404, detail=f"Fichier '{filename}' introuvable.")
     return filename, files[filename]
 
+def is_supported_db(filename: str) -> bool:
+    ext = filename.lower()
+    return ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.lf1s')
+
 # --- ROUTES ---
 
 @router.get("/preview")
 def preview_data(filename: str = Query(...), token: str = Depends(get_current_token)):
     real_name, content = get_specific_file(token, filename)
-    if not (real_name.lower().endswith('.si2s') or real_name.lower().endswith('.mdb')):
-         raise HTTPException(status_code=400, detail="Fichier non supporté.")
+    
+    if not is_supported_db(real_name):
+         raise HTTPException(status_code=400, detail="Fichier non supporté (SI2S, LF1S, MDB uniquement).")
 
     dfs = si2s_converter.extract_data_from_si2s(content)
     if dfs is None: raise HTTPException(status_code=500, detail="Erreur lecture SQLite.")
@@ -40,12 +45,19 @@ def preview_data(filename: str = Query(...), token: str = Depends(get_current_to
 @router.get("/download/{format}")
 def download_single(format: str, filename: str = Query(...), token: str = Depends(get_current_token)):
     real_name, content = get_specific_file(token, filename)
+    
+    # On réutilise le convertisseur SI2S car LF1S est aussi du SQLite
     dfs = si2s_converter.extract_data_from_si2s(content)
-    if not dfs: raise HTTPException(status_code=400, detail="Fichier vide.")
+    if not dfs: raise HTTPException(status_code=400, detail="Fichier vide ou illisible.")
 
     if format == "xlsx":
         excel_stream = si2s_converter.generate_excel_bytes(dfs)
-        new_name = real_name.lower().replace(".si2s", ".xlsx")
+        # On remplace l'extension source par .xlsx
+        new_name = real_name
+        for ext in ['.si2s', '.lf1s', '.mdb']: # Nettoyage extension
+            new_name = new_name.lower().replace(ext, "")
+        new_name += ".xlsx"
+        
         return StreamingResponse(
             excel_stream, 
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -59,50 +71,40 @@ def download_single(format: str, filename: str = Query(...), token: str = Depend
 
 @router.get("/download-all/{format}")
 def download_all_zip(format: str, token: str = Depends(get_current_token)):
-    """
-    Convertit TOUS les fichiers de la session et les renvoie dans un ZIP.
-    """
     files = session_manager.get_files(token)
     if not files:
         raise HTTPException(status_code=400, detail="Aucun fichier en session.")
 
-    # On prépare le ZIP en mémoire
     zip_buffer = io.BytesIO()
-    
     files_processed = 0
     
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for filename, content in files.items():
-            # On ne traite que les .SI2S / .mdb
-            if not (filename.lower().endswith('.si2s') or filename.lower().endswith('.mdb')):
+            if not is_supported_db(filename):
                 continue
                 
-            # Extraction
             dfs = si2s_converter.extract_data_from_si2s(content)
-            if not dfs: continue # On saute les fichiers vides
+            if not dfs: continue
             
-            # Conversion EXCEL
+            base_name = filename
+            for ext in ['.si2s', '.lf1s', '.mdb']:
+                base_name = base_name.lower().replace(ext, "")
+            
             if format == "xlsx":
                 excel_bytes = si2s_converter.generate_excel_bytes(dfs)
-                # On écrit le fichier Excel DANS le ZIP
-                new_name = filename.lower().replace(".si2s", ".xlsx")
-                zip_file.writestr(new_name, excel_bytes.getvalue())
+                zip_file.writestr(f"{base_name}.xlsx", excel_bytes.getvalue())
                 files_processed += 1
                 
-            # Conversion JSON
             elif format == "json":
                 data = {t: df.where(pd.notnull(df), None).to_dict(orient="records") for t, df in dfs.items()}
                 json_str = json.dumps(data, indent=2, default=str)
-                new_name = filename.lower().replace(".si2s", ".json")
-                zip_file.writestr(new_name, json_str)
+                zip_file.writestr(f"{base_name}.json", json_str)
                 files_processed += 1
     
     if files_processed == 0:
-        raise HTTPException(status_code=400, detail="Aucun fichier valide n'a pu être converti.")
+        raise HTTPException(status_code=400, detail="Aucun fichier valide (SI2S/LF1S) trouvé.")
 
-    # Fin du ZIP et retour au début du stream
     zip_buffer.seek(0)
-    
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
