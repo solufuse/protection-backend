@@ -11,6 +11,11 @@ class SwingBusInfo(BaseModel):
     config: Optional[str] = None
     script: Optional[str] = None
 
+class StudyCaseInfo(BaseModel):
+    id: Optional[str] = None        # Ex: LF_198
+    config: Optional[str] = None    # Ex: Normal
+    revision: Optional[str] = None  # Ex: CH199
+
 class TransformerData(BaseModel):
     tap: Optional[float] = None
     mw: Optional[float] = None
@@ -23,6 +28,10 @@ class TransformerData(BaseModel):
 class LoadflowResultFile(BaseModel):
     filename: str
     is_valid: bool = False
+    
+    # NOUVEAU : Infos du scénario
+    study_case: Optional[StudyCaseInfo] = None
+    
     swing_bus_found: Optional[SwingBusInfo] = None
     mw_flow: Optional[float] = None
     mvar_flow: Optional[float] = None
@@ -35,6 +44,5 @@ class LoadflowResultFile(BaseModel):
 
 class LoadflowResponse(BaseModel):
     status: str
-    best_file: Optional[str] = None
-    best_result: Optional[LoadflowResultFile] = None
+    best_file: Optional[str] = None # (Obsolète en multi-scénario, garde le dernier)
     results: List[LoadflowResultFile]
