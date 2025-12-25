@@ -1,12 +1,29 @@
-from pydantic import BaseModel, Field
-from typing import List, Dict, Optional
+from pydantic import BaseModel, Field, validator
+from typing import List, Dict, Optional, Any
 
 class TransformerInrushParams(BaseModel):
     name: str
-    sn_kva: float = Field(..., description="Puissance nominale en kVA")
-    u_kv: float = Field(..., description="Tension nominale en kV")
-    ratio_iencl: float = Field(..., description="Ratio I_inrush / I_nominal")
-    tau_ms: float = Field(..., description="Constante de temps d'amortissement en ms")
+    
+    # On accepte sn_kva, mais aussi 'Sn' ou 'power_kva' via alias
+    sn_kva: float = Field(..., alias="Sn", description="Puissance nominale en kVA")
+    
+    # On accepte u_kv, mais aussi 'Un' ou 'voltage_kv'
+    u_kv: float = Field(..., alias="Un", description="Tension nominale en kV")
+    
+    # --- VALEURS PAR DÉFAUT (Pour éviter le crash si manquant) ---
+    ratio_iencl: float = Field(8.0, description="Ratio I_inrush / I_nominal (Défaut: 8.0)")
+    tau_ms: float = Field(400.0, description="Constante de temps ms (Défaut: 400.0)")
+
+    # Cette config permet d'utiliser les noms d'alias (Sn/Un) OU les noms réels
+    class Config:
+        allow_population_by_field_name = True
+        extra = "ignore"  # On ignore les champs en trop (ex: ID, type...)
+
+    # Validateur de secours : si sn_kva est manquant mais qu'un autre champ ressemble
+    @validator('sn_kva', pre=True, check_fields=False)
+    def check_sn(cls, v, values):
+        if v is None: return 0.0
+        return v
 
 class InrushRequest(BaseModel):
     transformers: List[TransformerInrushParams]
@@ -21,14 +38,14 @@ class InrushResult(BaseModel):
     i_peak: float
     decay_curve_rms: Dict[str, float]
 
-# --- NOUVEAUX MODÈLES POUR LE TOTAL ---
 class InrushSummary(BaseModel):
-    total_curve_rms: Dict[str, float] = Field(..., description="Somme de TOUS les transfos")
-    hv_curve_rms: Dict[str, float] = Field(..., description="Somme des transfos > 50kV")
-    hv_transformers_list: List[str] = Field(..., description="Liste des transfos considérés comme HV")
+    total_curve_rms: Dict[str, float]
+    hv_curve_rms: Dict[str, float]
+    hv_transformers_list: List[str]
 
 class GlobalInrushResponse(BaseModel):
     status: str
+    source: Optional[str] = "unknown"
     count: int
-    summary: InrushSummary  # <--- Le résumé global
-    details: List[InrushResult] # <--- Les détails par transfo
+    summary: InrushSummary
+    details: List[InrushResult]
