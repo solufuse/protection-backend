@@ -7,54 +7,64 @@ import json
 
 router = APIRouter(prefix="/inrush", tags=["Inrush Calculation"])
 
-# --- HELPER ROBUSTE ---
+# --- HELPER ---
 def get_config_from_session(token: str) -> InrushRequest:
     files = session_manager.get_files(token)
     if not files:
-        raise HTTPException(status_code=400, detail="Session vide. Veuillez uploader un config.json via /session/upload.")
+        raise HTTPException(status_code=400, detail="Session vide. Veuillez uploader un config.json.")
     
     target_content = None
-    filename_found = ""
-    
-    # Priorité explicite à "config.json"
     if "config.json" in files:
         target_content = files["config.json"]
-        filename_found = "config.json"
     else:
-        # Sinon on cherche n'importe quel .json
+        # Fallback
         for name, content in files.items():
             if name.lower().endswith(".json"):
                 target_content = content
-                filename_found = name
                 break
     
     if target_content is None:
-        raise HTTPException(status_code=404, detail="Aucun fichier .json trouvé en session RAM.")
+        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé en session.")
 
     try:
-        # CORRECTION ICI : On décode les bytes en string avant de charger le JSON
+        # Décodage Bytes -> String
         if isinstance(target_content, bytes):
             text_content = target_content.decode('utf-8')
         else:
             text_content = target_content
-
         data = json.loads(text_content)
         return InrushRequest(**data)
-    except json.JSONDecodeError:
-         raise HTTPException(status_code=422, detail=f"Le fichier {filename_found} n'est pas un JSON valide.")
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Erreur structure JSON ({filename_found}): {e}")
+        raise HTTPException(status_code=422, detail=f"JSON Session invalide : {e}")
 
-# --- ROUTES ---
+# --- 1. VIA SESSION DATA ---
+@router.post("/calculate", response_model=GlobalInrushResponse)
+async def calculate_via_session(token: str = Depends(get_current_token)):
+    """
+    Calcul en utilisant le 'config.json' stocké en Session RAM.
+    """
+    request = get_config_from_session(token)
+    
+    if not request.transformers:
+        raise HTTPException(status_code=400, detail="Liste vide dans le config.json.")
 
+    data = inrush_calculator.process_inrush_request(request.transformers)
+    
+    return {
+        "status": "success",
+        "source": "session_data",
+        "summary": data["summary"],
+        "details": data["details"]
+    }
+
+# --- 2. VIA JSON BODY ---
 @router.post("/calculate-json", response_model=GlobalInrushResponse)
-async def calculate_inrush_manual(
+async def calculate_via_json(
     request: InrushRequest, 
     token: str = Depends(get_current_token)
 ):
     """
-    ✅ MÉTHODE MANUELLE
-    Copiez-collez votre JSON directement dans le "Request Body".
+    Calcul en envoyant la configuration dans le corps (Body) de la requête.
     """
     if not request.transformers:
         raise HTTPException(status_code=400, detail="Liste vide.")
@@ -63,30 +73,33 @@ async def calculate_inrush_manual(
     
     return {
         "status": "success",
-        "source": "manual_json_body",
-        "count": len(data["details"]),
+        "source": "json_body",
         "summary": data["summary"],
         "details": data["details"]
     }
 
-@router.post("/calculate", response_model=GlobalInrushResponse)
-async def calculate_inrush_auto(token: str = Depends(get_current_token)):
+# --- 3. VIA FILE UPLOAD (Config Download) ---
+@router.post("/calculate-config", response_model=GlobalInrushResponse)
+async def calculate_via_file_upload(
+    file: UploadFile = File(...),
+    token: str = Depends(get_current_token)
+):
     """
-    ✅ MÉTHODE AUTO (SESSION)
-    Utilise le fichier 'config.json' stocké en mémoire via /session/upload.
-    Laissez le corps de la requête vide.
+    Calcul en uploadant un fichier 'config.json' spécifique pour ce calcul.
     """
-    request = get_config_from_session(token)
-    
-    if not request.transformers:
-        raise HTTPException(status_code=400, detail="Liste vide dans le fichier config.json.")
+    try:
+        content = await file.read()
+        text_content = content.decode('utf-8')
+        data_json = json.loads(text_content)
+        request = InrushRequest(**data_json)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Fichier invalide : {e}")
 
     data = inrush_calculator.process_inrush_request(request.transformers)
     
     return {
         "status": "success",
-        "source": "session_memory",
-        "count": len(data["details"]),
+        "source": "file_upload",
         "summary": data["summary"],
         "details": data["details"]
     }
