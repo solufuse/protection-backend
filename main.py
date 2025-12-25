@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import system, auth, session, ingestion, engine, inrush
+from app.routers import system, auth, session, ingestion, engine, inrush, extraction, loadflow
 
 app = FastAPI(title="Solufuse Backend V2")
 
@@ -18,3 +18,5 @@ app.include_router(session.router)
 app.include_router(ingestion.router)
 app.include_router(engine.router)
 app.include_router(inrush.router)
+app.include_router(extraction.router)
+app.include_router(loadflow.router)
