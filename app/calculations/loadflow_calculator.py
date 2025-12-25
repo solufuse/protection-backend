@@ -6,29 +6,42 @@ from app.schemas.loadflow_schema import TransformerData, SwingBusInfo, StudyCase
 
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
     """
-    Core logic for Loadflow Analysis (Silent Mode).
+    Core logic for Loadflow Analysis.
+
+    Features:
+    - Multi-Scenario Support: Groups files by Study Case ID + Config.
+    - Battle Logic: Determines winner based on (1) Tolerance Check, (2) Precision, (3) Proximity.
+    - Silent Mode: Minimal logging to avoid spamming production logs.
+
+    Args:
+        files_content (dict): File data.
+        settings (LoadflowSettings): Configuration (Target MW, Tolerance).
+        only_winners (bool): Filter output to winners only.
+
+    Returns:
+        dict: LoadflowResponse structure.
     """
-    print(f"🚀 START ANALYSIS (Multi-Scenario Strategy)")
+    print(f"🚀 START ANALYSIS (Multi-Scenario Strategy - Silent Mode)")
     results = []
     
     target = settings.target_mw
     tol = settings.tolerance_mw
     
     # Dictionary to track the champion for each scenario group.
+    # Key: (StudyID, Config) -> Value: {filename, delta, valid, reason}
     champions = {}
     
-    count_files = 0
+    file_count = 0
 
     for filename, content in files_content.items():
         clean_name = os.path.basename(filename)
         ext = clean_name.lower()
         
-        # Skip temporary files
+        # Filter temp files
         if clean_name.startswith('~$') or not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
             continue
-
-        count_files += 1
-        # REMOVED: print(f"📂 Analyse : {filename}") -> To avoid spam
+            
+        file_count += 1
 
         res = {
             "filename": filename,
@@ -56,10 +69,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         res["is_valid"] = True
         
         # --- 2. EXTRACT STUDY CASE METADATA ---
-        study_id = "Unknown"
-        study_cfg = "Unknown"
-        study_rev = "Unknown"
-        
+        study_id = "Unknown"; study_cfg = "Unknown"; study_rev = "Unknown"
         if "ILFStudyCase" in dfs:
             val = dfs["ILFStudyCase"]
             df_study = pd.DataFrame(val) if isinstance(val, list) else val
@@ -68,7 +78,6 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                 if "ID" in df_study.columns: study_id = str(df_study.iloc[0]["ID"])
                 if "Config" in df_study.columns: study_cfg = str(df_study.iloc[0]["Config"])
                 if "Revision" in df_study.columns: study_rev = str(df_study.iloc[0]["Revision"])
-
         res["study_case"] = {"id": study_id, "config": study_cfg, "revision": study_rev}
 
         # --- 3. PREPARE DATAFRAMES ---
@@ -87,7 +96,6 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         target_bus_id = settings.swing_bus_id
         if df_lfr is not None:
             col_id_any = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'IDFROM']), None)
-            
             if not target_bus_id and col_id_any:
                 col_type = next((c for c in df_lfr.columns if 'TYPE' in c.upper()), None)
                 if col_type:
@@ -166,8 +174,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             
             group_key = (study_id, study_cfg)
             current_champ = champions.get(group_key)
-            is_new_king = False
-            reason = ""
+            is_new_king = False; reason = ""
             
             if current_champ is None:
                 is_new_king = True; reason = "First candidate"
@@ -175,7 +182,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                 champ_valid = current_champ["valid"]
                 champ_delta = current_champ["delta"]
                 if candidate_is_valid and not champ_valid:
-                    is_new_king = True; reason = "Validity"
+                    is_new_king = True; reason = "Validity (Green beats Red)"
                 elif candidate_is_valid and champ_valid:
                     if delta < champ_delta:
                         is_new_king = True; reason = f"Precision ({delta} < {champ_delta})"
@@ -190,7 +197,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                     "valid": candidate_is_valid,
                     "reason": reason
                 }
-                # REMOVED: print(f"   👑 NEW KING...") -> To avoid spam
+                # Silent mode: No print here
 
         results.append(res)
 
@@ -206,7 +213,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             r["victory_reason"] = champ["reason"]
             win_count += 1
     
-    print(f"✅ ANALYSIS COMPLETE. Processed {count_files} files. Found {win_count} winners.")
+    print(f"✅ ANALYSIS COMPLETE. {file_count} files processed. {win_count} winners identified.")
 
     if only_winners:
         results = [r for r in results if r.get("is_winner") is True]
