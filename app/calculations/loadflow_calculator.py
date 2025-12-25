@@ -5,25 +5,23 @@ from app.calculations import si2s_converter
 from app.schemas.loadflow_schema import TransformerData, SwingBusInfo
 
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
-    print(f"🚀 DÉBUT ANALYSE (AVEC RAISON VICTOIRE)")
+    print(f"🚀 DÉBUT ANALYSE (MODE FINAL)")
     results = []
     
     target = settings.target_mw
     tol = settings.tolerance_mw
     
-    # --- CHAMPION ACTUEL ---
     champion_file = None
     champion_delta = float('inf')
     champion_is_valid = False
-    champion_reason = None # On stocke la raison ici
+    champion_reason = None
 
-    # --- 1. TRAITEMENT ---
     for filename, content in files_content.items():
-        # Nettoyage nom de fichier
         clean_name = os.path.basename(filename)
         ext = clean_name.lower()
         
-        # FILTRE : Ignore les fichiers temporaires (~$) et les extensions non supportées
+        # --- FILTRE ANTI-ERREUR SQLITE ---
+        # On ignore les fichiers temporaires (~$) et ceux qui ne sont pas des DBs
         if clean_name.startswith('~$') or not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
             continue
 
@@ -40,12 +38,11 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             "victory_reason": None
         }
 
-        # 1. Extraction (Protection Try/Except renforcée)
         try:
             dfs = si2s_converter.extract_data_from_si2s(content)
             if dfs and "data" in dfs and isinstance(dfs["data"], dict): dfs = dfs["data"]
-        except Exception as e:
-            # On ignore silencieusement les erreurs de lecture pour ne pas polluer
+        except Exception:
+            # On capture l'erreur silencieusement pour ne pas polluer les logs en rouge
             dfs = None
             
         if not dfs:
@@ -53,7 +50,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             
         res["is_valid"] = True
         
-        # 2. Tables
+        # Tables
         df_lfr = None; df_tx = None
         for k in dfs.keys():
             key_upper = k.upper()
@@ -65,7 +62,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         if df_lfr is not None: df_lfr.columns = [str(c).strip() for c in df_lfr.columns]
         if df_tx is not None: df_tx.columns = [str(c).strip() for c in df_tx.columns]
 
-        # 3. MW Flow
+        # Swing Bus
         target_bus_id = settings.swing_bus_id
         if df_lfr is not None:
             col_id_any = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'IDFROM']), None)
@@ -92,7 +89,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                         try: res["mvar_flow"] = float(str(row[col_mvar]).replace(',', '.'))
                         except: pass
 
-        # 4. Transfos
+        # Transfos
         if df_tx is not None and df_lfr is not None:
             col_id_tx = next((c for c in df_tx.columns if c.upper() in ['ID', 'DEVICE ID']), None)
             col_from = next((c for c in df_tx.columns if c.upper() in ['FROMBUS', 'FROMID', 'FROMTO']), None)
@@ -137,7 +134,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                         except: pass
                         res["transformers"][tx_id] = data
 
-        # --- 5. LOGIQUE BATTLE ---
+        # Battle Logic
         if res["mw_flow"] is not None:
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
@@ -167,17 +164,16 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                 champion_file = filename
                 champion_delta = delta
                 champion_is_valid = candidate_is_valid
-                champion_reason = reason # On mémorise la raison
+                champion_reason = reason
 
         results.append(res)
 
-    # --- FINALISATION ---
     final_best_result = None
     if champion_file:
         for r in results:
             if r["filename"] == champion_file:
                 r["is_winner"] = True
-                r["victory_reason"] = champion_reason # On l'injecte dans le résultat final
+                r["victory_reason"] = champion_reason
                 final_best_result = r
                 break
     
