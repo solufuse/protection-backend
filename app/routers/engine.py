@@ -11,14 +11,17 @@ import io
 
 router = APIRouter(prefix="/engine-pc", tags=["Protection Coordination (PC)"])
 
+def is_supported(fname: str) -> bool:
+    e = fname.lower()
+    return e.endswith('.si2s') or e.endswith('.mdb') or e.endswith('.lf1s')
+
 # --- HELPERS ---
 def get_merged_dataframes_for_calc(token: str):
-    """Fusionne pour le calcul topologique (interne)"""
     files = session_manager.get_files(token)
     if not files: return {}
     merged_dfs = {}
     for name, content in files.items():
-        if name.lower().endswith('.si2s') or name.lower().endswith('.mdb'):
+        if is_supported(name): # <--- Support LF1S ici
             dfs = si2s_converter.extract_data_from_si2s(content)
             if dfs:
                 for t, df in dfs.items():
@@ -52,118 +55,75 @@ async def run_study_file(file: UploadFile = File(...), token: str = Depends(get_
     except Exception as e: raise HTTPException(status_code=422, detail=f"Erreur config: {e}")
     return _execute_calculation_logic(valid_config, token)
 
-# --- DATA EXPLORER & EXPORT ---
+# --- DATA EXPLORER ---
 
 def _collect_explorer_data(token, table_search, filename_filter):
-    """Récupère les données brutes par fichier"""
     files = session_manager.get_files(token)
     if not files: return {}
-    
     results = {}
-    
     for fname, content in files.items():
-        # Filtre Fichier
-        if filename_filter and filename_filter.lower() not in fname.lower():
-            continue
-        if not (fname.lower().endswith('.si2s') or fname.lower().endswith('.mdb')):
-            continue
+        if filename_filter and filename_filter.lower() not in fname.lower(): continue
+        
+        if not is_supported(fname): continue # <--- Support LF1S
 
         dfs = si2s_converter.extract_data_from_si2s(content)
         if not dfs: continue
         
         file_results = {}
         for table_name, df in dfs.items():
-            # Filtre Table
-            if table_search and table_search.upper() not in table_name.upper():
-                continue
+            if table_search and table_search.upper() not in table_name.upper(): continue
             file_results[table_name] = df
             
-        if file_results:
-            results[fname] = file_results
+        if file_results: results[fname] = file_results
             
     return results
 
 @router.get("/data-explorer")
 def explore_si2s_data(
-    table_search: Optional[str] = Query(None, description="Filtre sur le nom de la table"),
-    filename: Optional[str] = Query(None, description="Filtre sur un fichier spécifique"),
-    export_format: Optional[str] = Query(None, regex="^(json|xlsx)$", description="Format d'export (laisser vide pour voir le JSON)"),
+    table_search: Optional[str] = Query(None),
+    filename: Optional[str] = Query(None),
+    export_format: Optional[str] = Query(None, regex="^(json|xlsx)$"),
     token: str = Depends(get_current_token)
 ):
-    """
-    🔍 EXPLORATEUR & EXPORT
-    - **Visualisation** : Laisser `export_format` vide.
-    - **Téléchargement** : Mettre `export_format=xlsx` ou `json`.
-    """
-    
-    # 1. Récupération des DataFrames bruts
     raw_data = _collect_explorer_data(token, table_search, filename)
-    
-    if not raw_data:
-        raise HTTPException(status_code=404, detail="Aucune donnée trouvée avec ces filtres.")
+    if not raw_data: raise HTTPException(status_code=404, detail="Aucune donnée trouvée.")
 
-    # --- MODE EXPORT EXCEL ---
     if export_format == "xlsx":
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            
-            # On doit regrouper par Table pour faire des onglets Excel propres
-            # Structure cible : { "IConnect": [df_fichier1, df_fichier2], ... }
             tables_aggregated = {}
-            
             for fname, tables in raw_data.items():
                 for t_name, df in tables.items():
-                    # On ajoute une colonne pour savoir de quel fichier ça vient
                     df_copy = df.copy()
                     df_copy.insert(0, "_SourceFile", fname)
-                    
-                    if t_name not in tables_aggregated:
-                        tables_aggregated[t_name] = []
+                    if t_name not in tables_aggregated: tables_aggregated[t_name] = []
                     tables_aggregated[t_name].append(df_copy)
             
-            # Écriture des onglets
             for t_name, df_list in tables_aggregated.items():
-                # Excel limite nom onglet à 31 cars
                 sheet_name = t_name[:31]
                 full_df = pd.concat(df_list, ignore_index=True)
-                
-                # Gestion doublons onglets (rare mais possible avec le substring)
                 count = 1
                 base = sheet_name
                 while sheet_name in writer.book.sheetnames:
-                    sheet_name = f"{base[:28]}_{count}"
-                    count += 1
-                    
+                    sheet_name = f"{base[:28]}_{count}"; count += 1
                 full_df.to_excel(writer, sheet_name=sheet_name, index=False)
         
         output.seek(0)
-        filename_dl = f"explorer_export_{table_search if table_search else 'full'}.xlsx"
-        
         return StreamingResponse(
             output,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f"attachment; filename={filename_dl}"}
+            headers={"Content-Disposition": "attachment; filename=explorer_export.xlsx"}
         )
 
-    # --- MODE EXPORT JSON (Fichier) ---
     elif export_format == "json":
-        # On convertit les DataFrames en dict pour le JSON
         json_ready = {}
         for fname, tables in raw_data.items():
             json_ready[fname] = {}
             for t_name, df in tables.items():
-                # Conversion safe pour JSON
                 json_ready[fname][t_name] = df.where(pd.notnull(df), None).to_dict(orient="records")
-                
-        filename_dl = f"explorer_export_{table_search if table_search else 'full'}.json"
-        return JSONResponse(
-            content=json_ready,
-            headers={"Content-Disposition": f"attachment; filename={filename_dl}"}
-        )
+        return JSONResponse(content=json_ready, headers={"Content-Disposition": "attachment; filename=explorer.json"})
 
-    # --- MODE VISUALISATION (Défaut) ---
     else:
-        # Version allégée pour l'affichage (Max 20 lignes)
         preview_data = {}
         for fname, tables in raw_data.items():
             preview_data[fname] = {}
@@ -173,9 +133,4 @@ def explore_si2s_data(
                     "columns": list(df.columns),
                     "preview": df.head(20).where(pd.notnull(df), None).to_dict(orient="records")
                 }
-                
-        return {
-            "mode": "preview",
-            "filters": {"filename": filename, "table": table_search},
-            "data": preview_data
-        }
+        return {"mode": "preview", "filters": {"filename": filename}, "data": preview_data}
