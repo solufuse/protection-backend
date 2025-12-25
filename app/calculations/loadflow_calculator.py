@@ -4,7 +4,7 @@ from app.calculations import si2s_converter
 from app.schemas.loadflow_schema import TransformerData, SwingBusInfo
 
 def analyze_loadflow(files_content: dict, settings) -> dict:
-    print("🚀 DÉBUT ANALYSE (MVAR FIX + SWING INFO)")
+    print("🚀 DÉBUT ANALYSE (HIGHLIGHT WINNER)")
     results = []
     
     target = settings.target_mw
@@ -12,6 +12,7 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
     best_file = None
     min_delta = float('inf')
 
+    # --- 1. TRAITEMENT DE CHAQUE FICHIER ---
     for filename, content in files_content.items():
         ext = filename.lower()
         if not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.json')):
@@ -19,14 +20,10 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
 
         print(f"\n📂 Analyse : {filename}")
 
-        # Structure de résultat par défaut
         res = {
             "filename": filename,
             "is_valid": False,
-            "swing_bus_found": {
-                "config": settings.swing_bus_id,
-                "script": None
-            },
+            "swing_bus_found": { "config": settings.swing_bus_id, "script": None },
             "mw_flow": None,
             "mvar_flow": None,
             "transformers": {},
@@ -64,52 +61,39 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
         if df_lfr is not None: df_lfr.columns = [str(c).strip() for c in df_lfr.columns]
         if df_tx is not None: df_tx.columns = [str(c).strip() for c in df_tx.columns]
 
-        # --- SWING BUS (MW + MVAR) ---
-        # 1. Détermination du Bus à lire
-        target_bus_id = settings.swing_bus_id # Priorité Config
-        detected_bus_id = None
-        
+        # --- SWING BUS ---
+        target_bus_id = settings.swing_bus_id
         if df_lfr is not None:
             col_id_any = next((c for c in df_lfr.columns if c.upper() in ['ID', 'BUSID', 'IDFROM']), None)
             
-            # Si pas de config, on cherche la ligne SWNG
             if not target_bus_id and col_id_any:
                 col_type = next((c for c in df_lfr.columns if 'TYPE' in c.upper()), None)
                 if col_type:
                     swing_rows = df_lfr[df_lfr[col_type].astype(str).str.upper().str.contains('SWNG|SWING')]
                     if not swing_rows.empty:
-                        detected_bus_id = str(swing_rows.iloc[0][col_id_any])
-                        target_bus_id = detected_bus_id # On l'adopte comme cible
+                        target_bus_id = str(swing_rows.iloc[0][col_id_any])
+            
+            res["swing_bus_found"]["script"] = target_bus_id
 
-            # Mise à jour du rapport Swing Bus Found
-            res["swing_bus_found"] = {
-                "config": settings.swing_bus_id, # Ce que l'user a demandé
-                "script": target_bus_id          # Ce que le script a finalement utilisé
-            }
-
-            # 2. Lecture des Valeurs (MW + MVAR)
             if target_bus_id:
                 col_mw = next((c for c in df_lfr.columns if c.upper() in ['LFMW', 'MW', 'MWLOADING', 'P (MW)']), None)
-                # FIX MVAR : Ajout explicite de la détection de colonne
                 col_mvar = next((c for c in df_lfr.columns if c.upper() in ['LFMVAR', 'MVAR', 'Q (MVAR)']), None)
-                
                 cols_search = [c for c in df_lfr.columns if c.upper() in ['ID', 'IDFROM', 'IDTO']]
+                
                 mask = pd.Series(False, index=df_lfr.index)
                 for c in cols_search: mask |= (df_lfr[c] == target_bus_id)
-                
                 rows = df_lfr[mask]
+                
                 if not rows.empty:
                     row = rows.iloc[0]
-                    # MW
                     if col_mw:
                         try: res["mw_flow"] = float(str(row[col_mw]).replace(',', '.'))
                         except: pass
-                    # MVAR (Le fix est ici)
                     if col_mvar:
                         try: res["mvar_flow"] = float(str(row[col_mvar]).replace(',', '.'))
                         except: pass
 
-        # --- TRANSFOS (Inchangé, car ça marche) ---
+        # --- TRANSFOS ---
         if df_tx is not None and df_lfr is not None:
             col_id_tx = next((c for c in df_tx.columns if c.upper() in ['ID', 'DEVICE ID']), None)
             col_from = next((c for c in df_tx.columns if c.upper() in ['FROMBUS', 'FROMID', 'FROMTO']), None)
@@ -158,7 +142,7 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
                         except: pass
                         res["transformers"][tx_id] = data
 
-        # --- WINNER ---
+        # --- CALCUL WINNER ---
         if res["mw_flow"] is not None:
             delta = abs(res["mw_flow"] - target)
             res["delta_target"] = round(delta, 3)
@@ -183,13 +167,19 @@ def analyze_loadflow(files_content: dict, settings) -> dict:
 
         results.append(res)
 
+    # --- 2. FINALISATION & HIGHLIGHT ---
+    final_best_result = None
+    
     if best_file:
         for r in results:
             if r["filename"] == best_file:
                 r["is_winner"] = True
+                final_best_result = r  # On capture l'objet complet
+                break
 
     return {
         "status": "success",
         "best_file": best_file,
+        "best_result": final_best_result, # <--- ICI LE TRUC QUE TU VEUX
         "results": results
     }
