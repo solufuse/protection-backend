@@ -1,9 +1,10 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from app.core.security import get_current_token
-from app.services import session_manager  # <--- Le même que Loadflow
+from app.services import session_manager
 from typing import List
 import zipfile
 import io
+import os
 
 router = APIRouter(prefix="/session", tags=["Session RAM"])
 
@@ -47,6 +48,7 @@ def get_details(token: str = Depends(get_current_token)):
             size = len(content) if isinstance(content, bytes) else len(str(content))
             files_info.append({
                 "filename": name,
+                "short_name": os.path.basename(name), # <--- Ajout du nom court
                 "size": size,
                 "content_type": "application/octet-stream"
             })
@@ -57,7 +59,7 @@ def get_details(token: str = Depends(get_current_token)):
         "files": files_info
     }
 
-@router.delete("/file/{filename}")
+@router.delete("/file/{filename:path}")
 def delete_file(filename: str, token: str = Depends(get_current_token)):
     """ Supprime un fichier spécifique """
     files = session_manager.get_files(token)
