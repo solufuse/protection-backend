@@ -9,7 +9,7 @@ def get_col_value(row, candidates):
             return str(row[col]).strip()
     return None
 
-# --- TRANSFORMER LOGIC (Unchanged) ---
+# --- TRANSFORMER LOGIC ---
 def resoudre_topologie_transformer(plan, df_xfmr_global):
     if plan.type != 'TRANSFORMER': return plan
     
@@ -38,14 +38,14 @@ def resoudre_topologie_transformer(plan, df_xfmr_global):
         if bus_sec: plan.bus_to = bus_sec
         
         plan.topology_origin = "script_topo"
-        plan.debug_info = f"Found in SI2S ({tx_id})"
+        plan.debug_info = f"Found in DB ({tx_id})" # <--- UPDATED
         plan.meta_data = {"user_config_was": {"from": user_from, "to": user_to}}
     else:
         plan.topology_origin = "config_user"
         
     return plan
 
-# --- COUPLING & INCOMER LOGIC (IConnect Update) ---
+# --- COUPLING & INCOMER LOGIC (IConnect) ---
 def resoudre_topologie_iconnect(plan, df_iconnect):
     """
     Searches specifically in the IConnect table.
@@ -59,7 +59,7 @@ def resoudre_topologie_iconnect(plan, df_iconnect):
     # 1. If no IConnect table found
     if df_iconnect is None or df_iconnect.empty:
         plan.topology_origin = "config_user"
-        plan.debug_info = "IConnect table missing from SI2S."
+        plan.debug_info = "IConnect table missing from DB." # <--- UPDATED
         return plan
         
     # 2. ID Search

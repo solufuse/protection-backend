@@ -34,7 +34,7 @@ def get_merged_dataframes_for_calc(token: str):
     return final
 
 def _execute_calculation_logic(config: ProjectConfig, token: str):
-    # We ALWAYS need the network files (.si2s) from the session
+    # We ALWAYS need the network files (.si2s, .lf1s) from the session
     dfs_dict = get_merged_dataframes_for_calc(token)
     
     # topology_manager handles if dfs_dict is empty (pure config simulation mode)
@@ -77,7 +77,7 @@ def get_config_from_session(token: str) -> ProjectConfig:
 @router.post("/run")
 async def run_via_session(token: str = Depends(get_current_token)):
     """
-    Uses 'config.json' and network files (.si2s) from RAM Session.
+    Uses 'config.json' and network files from RAM Session.
     """
     config = get_config_from_session(token)
     return _execute_calculation_logic(config, token)
@@ -86,7 +86,7 @@ async def run_via_session(token: str = Depends(get_current_token)):
 @router.post("/run-json")
 async def run_via_json(config: ProjectConfig, token: str = Depends(get_current_token)):
     """
-    Uses config sent in Body + network files (.si2s) in Session.
+    Uses config sent in Body + network files in Session.
     """
     return _execute_calculation_logic(config, token)
 
@@ -97,7 +97,7 @@ async def run_via_file_upload(
     token: str = Depends(get_current_token)
 ):
     """
-    Uses uploaded config file + network files (.si2s) in Session.
+    Uses uploaded config file + network files in Session.
     """
     content = await file.read()
     try: 
@@ -108,7 +108,7 @@ async def run_via_file_upload(
         
     return _execute_calculation_logic(valid_config, token)
 
-# --- Data Explorer (Minimal to avoid breaking file) ---
+# --- Data Explorer ---
 def _collect_explorer_data(token, table_search, filename_filter):
     files = session_manager.get_files(token)
     if not files: return {}
@@ -126,11 +126,14 @@ def _collect_explorer_data(token, table_search, filename_filter):
     return results
 
 @router.get("/data-explorer")
-def explore_si2s_data(
+def explore_db_data(  # <--- RENAMED from explore_si2s_data
     table_search: Optional[str] = Query(None),
     filename: Optional[str] = Query(None),
     token: str = Depends(get_current_token)
 ):
+    """
+    Explore contents of loaded database files (SI2S, LF1S, MDB).
+    """
     raw_data = _collect_explorer_data(token, table_search, filename)
     if not raw_data: raise HTTPException(status_code=404, detail="No data found.")
     preview_data = {}
