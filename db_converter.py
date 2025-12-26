@@ -5,6 +5,9 @@ import os
 from io import BytesIO
 
 def extract_data_from_db(file_stream: BytesIO) -> dict:
+    """
+    Fonction originale restaurée : Convertit SQLite binaire en Dict via Pandas.
+    """
     with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as tmp_file:
         tmp_file.write(file_stream.getbuffer())
         tmp_path = tmp_file.name
@@ -23,6 +26,7 @@ def extract_data_from_db(file_stream: BytesIO) -> dict:
             if name.startswith('sqlite_'):
                 continue
             df = pd.read_sql_query(f"SELECT * FROM '{name}'", conn)
+            # Gestion des valeurs null pour JSON
             df = df.where(pd.notnull(df), None)
             db_data[name] = df.to_dict(orient='records')
             
