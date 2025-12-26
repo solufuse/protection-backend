@@ -1,13 +1,6 @@
 fastapi
 uvicorn
-pydantic
-firebase-admin
-requests
-pandas
-
 python-multipart
-
-openpyxl
-
-firebase-admin==6.2.0
 requests
+pydantic
+firebase-admin==6.2.0
