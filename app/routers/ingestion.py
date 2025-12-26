@@ -14,7 +14,11 @@ try:
 except ImportError:
     from firebase_config import db, bucket
 
-router = APIRouter()
+# --- CORRECTION ICI : ON FORCE LE PREFIXE ---
+router = APIRouter(
+    prefix="/ingestion",
+    tags=["ingestion"]
+)
 
 class IngestionRequest(BaseModel):
     user_id: str
@@ -23,7 +27,7 @@ class IngestionRequest(BaseModel):
 
 def process_file_task(req: IngestionRequest):
     if not db or not bucket:
-        print("❌ ABORT: Firebase non initialisé (vérifiez les logs du serveur)")
+        print("❌ ABORT: Firebase non initialisé.")
         return
 
     temp_dir = tempfile.mkdtemp()
@@ -31,46 +35,49 @@ def process_file_task(req: IngestionRequest):
     
     try:
         print(f"📥 Downloading file for user {req.user_id}...")
+        # 1. DOWNLOAD
         with requests.get(req.file_url, stream=True) as r:
             r.raise_for_status()
             with open(local_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
         
-        # Simulation Traitement
+        # 2. PROCESSING (Mock)
         print("⚙️ Processing file...")
         result_data = {
             "project_name": "Imported Project",
             "source_file": req.file_url,
             "processed_at": datetime.now().isoformat(),
-            "transformers": [{"name": "TX-DEMO", "sn_kva": 1000}],
+            "transformers": [{"name": "TX-IMPORTED", "sn_kva": 2500}],
             "plans": []
         }
         
+        # Si c'est un JSON, on le charge tel quel
         if req.file_type == 'json':
             try:
                 with open(local_path, 'r') as f:
                     result_data = json.load(f)
             except: pass
 
-        # Upload Resultat
+        # 3. UPLOAD RESULT (JSON)
         result_filename = f"processed/{req.user_id}/{uuid.uuid4()}.json"
         blob = bucket.blob(result_filename)
         blob.upload_from_string(json.dumps(result_data), content_type='application/json')
         print(f"💾 Result uploaded to {result_filename}")
 
-        # Firestore Write
+        # 4. FIRESTORE WRITE (C'est ça qui affiche le fichier sur le site)
+        # On utilise une collection générique si besoin, ou la structure users/{uid}/configurations
         doc_ref = db.collection('users').document(req.user_id).collection('configurations').document()
         doc_ref.set({
-            'created_at': datetime.utcnow(), # Attention: firestore.SERVER_TIMESTAMP parfois bug sans import
+            'created_at': datetime.utcnow(), 
             'source_type': req.file_type,
-            'original_name': 'Uploaded File',
+            'original_name': 'Imported File',
             'processed': True,
             'is_large_file': True,
             'storage_path': result_filename,
-            'raw_data': None
+            'raw_data': None # On garde le document léger
         })
-        print("✅ Firestore document created!")
+        print(f"✅ Firestore document created! ID: {doc_ref.id}")
 
     except Exception as e:
         print(f"❌ Error processing file: {e}")
