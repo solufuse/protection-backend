@@ -7,19 +7,7 @@ from app.schemas.loadflow_schema import TransformerData, SwingBusInfo, StudyCase
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
     """
     Core logic for Loadflow Analysis.
-
-    Features:
-    - Multi-Scenario Support: Groups files by Study Case ID + Config.
-    - Battle Logic: Determines winner based on (1) Tolerance Check, (2) Precision, (3) Proximity.
-    - Silent Mode: Minimal logging to avoid spamming production logs.
-
-    Args:
-        files_content (dict): File data.
-        settings (LoadflowSettings): Configuration (Target MW, Tolerance).
-        only_winners (bool): Filter output to winners only.
-
-    Returns:
-        dict: LoadflowResponse structure.
+    Now separates 'path' (full) and 'filename' (short).
     """
     print(f"🚀 START ANALYSIS (Multi-Scenario Strategy - Silent Mode)")
     results = []
@@ -27,14 +15,14 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
     target = settings.target_mw
     tol = settings.tolerance_mw
     
-    # Dictionary to track the champion for each scenario group.
-    # Key: (StudyID, Config) -> Value: {filename, delta, valid, reason}
+    # Key: (StudyID, Config) -> Value: {filename (FULL PATH), delta, valid, reason}
     champions = {}
     
     file_count = 0
 
     for filename, content in files_content.items():
-        clean_name = os.path.basename(filename)
+        # filename represents the KEY from the dictionary (Full Path)
+        clean_name = os.path.basename(filename) # Short Name
         ext = clean_name.lower()
         
         # Filter temp files
@@ -44,7 +32,8 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         file_count += 1
 
         res = {
-            "filename": filename,
+            "path": filename,       # Full Path (Unique ID)
+            "filename": clean_name, # Short Name (Display)
             "is_valid": False,
             "study_case": {"id": None, "config": None, "revision": None},
             "swing_bus_found": { "config": settings.swing_bus_id, "script": None },
@@ -192,12 +181,11 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
 
             if is_new_king:
                 champions[group_key] = {
-                    "filename": filename,
+                    "filename": filename, # Storing FULL PATH as key
                     "delta": delta,
                     "valid": candidate_is_valid,
                     "reason": reason
                 }
-                # Silent mode: No print here
 
         results.append(res)
 
@@ -208,7 +196,9 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         s_cfg = r["study_case"]["config"]
         group_key = (s_id, s_cfg)
         champ = champions.get(group_key)
-        if champ and champ["filename"] == r["filename"]:
+        
+        # Compare current result's PATH with the champion's stored filename (which is a path)
+        if champ and champ["filename"] == r["path"]:
             r["is_winner"] = True
             r["victory_reason"] = champ["reason"]
             win_count += 1
