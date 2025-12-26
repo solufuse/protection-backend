@@ -35,8 +35,8 @@ class ProtectionPlan(BaseModel):
     bus_from: Optional[str] = None
     bus_to: Optional[str] = None
     
-    # TRACABILITÉ
-    topology_origin: str = Field("unknown", description="config_user ou script_topo")
+    # TRACEABILITY
+    topology_origin: str = Field("unknown", description="config_user or script_topo")
     debug_info: Optional[str] = None
     meta_data: Optional[Dict[str, Any]] = None
 

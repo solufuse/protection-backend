@@ -11,8 +11,8 @@ class TextRequest(BaseModel):
 @router.post("/parse")
 async def parse_text(req: TextRequest, token: str = Depends(get_current_token)):
     """
-    Analyse un texte brut pour extraire les données électriques (Sn, Un, In).
-    Exemple: "Transfo 63MVA 225kV" -> {power_kva: 63000, voltage_kv: 225}
+    Parses raw text to extract electrical data (Sn, Un, In).
+    Example: "Transfo 63MVA 225kV" -> {power_kva: 63000, voltage_kv: 225}
     """
     result = text_parser.parse_technical_text(req.text)
     return {

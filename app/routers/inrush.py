@@ -7,11 +7,11 @@ import json
 
 router = APIRouter(prefix="/inrush", tags=["Inrush Calculation"])
 
-# --- HELPER (Avec Logique Robust V2) ---
+# --- HELPER (With Robust Logic V2) ---
 def get_config_from_session(token: str) -> InrushRequest:
     files = session_manager.get_files(token)
     if not files:
-        raise HTTPException(status_code=400, detail="Session vide. Veuillez uploader un config.json.")
+        raise HTTPException(status_code=400, detail="Empty session. Please upload a config.json.")
     
     target_content = None
     if "config.json" in files:
@@ -23,38 +23,38 @@ def get_config_from_session(token: str) -> InrushRequest:
                 break
     
     if target_content is None:
-        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé en session.")
+        raise HTTPException(status_code=404, detail="No 'config.json' found in session.")
 
     try:
-        # Décodage Bytes -> String
+        # Decode Bytes -> String
         if isinstance(target_content, bytes):
             text_content = target_content.decode('utf-8')
         else:
             text_content = target_content
         
-        # Pydantic V2 s'occupe du reste grâce au schéma permissif qu'on a mis avant
+        # Pydantic V2 handles the rest thanks to the permissive schema we set up
         data = json.loads(text_content)
         return InrushRequest(**data)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"JSON Session invalide : {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid Session JSON: {e}")
 
 # --- 1. VIA SESSION DATA ---
 @router.post("/calculate", response_model=GlobalInrushResponse)
 async def calculate_via_session(token: str = Depends(get_current_token)):
     """
-    Calcul en utilisant le 'config.json' stocké en Session RAM.
+    Calculation using 'config.json' stored in RAM Session.
     """
     request = get_config_from_session(token)
     
     if not request.transformers:
-        raise HTTPException(status_code=400, detail="Liste vide dans le config.json.")
+        raise HTTPException(status_code=400, detail="Empty list in config.json.")
 
     data = inrush_calculator.process_inrush_request(request.transformers)
     
     return {
         "status": "success",
         "source": "session_data",
-        "count": len(data["details"]), # <--- C'ÉTAIT L'OUBLI !
+        "count": len(data["details"]),
         "summary": data["summary"],
         "details": data["details"]
     }
@@ -66,17 +66,17 @@ async def calculate_via_json(
     token: str = Depends(get_current_token)
 ):
     """
-    Calcul en envoyant la configuration dans le corps (Body) de la requête.
+    Calculation by sending configuration in request Body.
     """
     if not request.transformers:
-        raise HTTPException(status_code=400, detail="Liste vide.")
+        raise HTTPException(status_code=400, detail="Empty list.")
         
     data = inrush_calculator.process_inrush_request(request.transformers)
     
     return {
         "status": "success",
         "source": "json_body",
-        "count": len(data["details"]), # <--- AJOUTÉ ICI AUSSI
+        "count": len(data["details"]),
         "summary": data["summary"],
         "details": data["details"]
     }
@@ -88,7 +88,7 @@ async def calculate_via_file_upload(
     token: str = Depends(get_current_token)
 ):
     """
-    Calcul en uploadant un fichier 'config.json' spécifique pour ce calcul.
+    Calculation by uploading a specific 'config.json' for this run.
     """
     try:
         content = await file.read()
@@ -96,14 +96,14 @@ async def calculate_via_file_upload(
         data_json = json.loads(text_content)
         request = InrushRequest(**data_json)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Fichier invalide : {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid file: {e}")
 
     data = inrush_calculator.process_inrush_request(request.transformers)
     
     return {
         "status": "success",
         "source": "file_upload",
-        "count": len(data["details"]), # <--- AJOUTÉ ICI AUSSI
+        "count": len(data["details"]),
         "summary": data["summary"],
         "details": data["details"]
     }

@@ -34,10 +34,10 @@ def get_merged_dataframes_for_calc(token: str):
     return final
 
 def _execute_calculation_logic(config: ProjectConfig, token: str):
-    # On a TOUJOURS besoin des fichiers réseaux (.si2s) de la session
+    # We ALWAYS need the network files (.si2s) from the session
     dfs_dict = get_merged_dataframes_for_calc(token)
     
-    # topology_manager gère si dfs_dict est vide (mode simulation pure config)
+    # topology_manager handles if dfs_dict is empty (pure config simulation mode)
     config_updated = topology_manager.resolve_all(config, dfs_dict)
     
     return {
@@ -49,7 +49,7 @@ def _execute_calculation_logic(config: ProjectConfig, token: str):
 
 def get_config_from_session(token: str) -> ProjectConfig:
     files = session_manager.get_files(token)
-    if not files: raise HTTPException(status_code=400, detail="Session vide.")
+    if not files: raise HTTPException(status_code=400, detail="Empty session.")
     
     target_content = None
     if "config.json" in files:
@@ -61,7 +61,7 @@ def get_config_from_session(token: str) -> ProjectConfig:
                 break
     
     if target_content is None:
-        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé en session.")
+        raise HTTPException(status_code=404, detail="No 'config.json' found in session.")
 
     try:
         if isinstance(target_content, bytes):
@@ -71,13 +71,13 @@ def get_config_from_session(token: str) -> ProjectConfig:
         data = json.loads(text_content)
         return ProjectConfig(**data)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Config JSON Session invalide : {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid Session Config JSON: {e}")
 
 # --- 1. VIA SESSION DATA ---
 @router.post("/run")
 async def run_via_session(token: str = Depends(get_current_token)):
     """
-    Utilise le 'config.json' et les fichiers réseaux (.si2s) en Session RAM.
+    Uses 'config.json' and network files (.si2s) from RAM Session.
     """
     config = get_config_from_session(token)
     return _execute_calculation_logic(config, token)
@@ -86,7 +86,7 @@ async def run_via_session(token: str = Depends(get_current_token)):
 @router.post("/run-json")
 async def run_via_json(config: ProjectConfig, token: str = Depends(get_current_token)):
     """
-    Utilise la config envoyée dans le Body + les fichiers réseaux (.si2s) en Session.
+    Uses config sent in Body + network files (.si2s) in Session.
     """
     return _execute_calculation_logic(config, token)
 
@@ -97,18 +97,18 @@ async def run_via_file_upload(
     token: str = Depends(get_current_token)
 ):
     """
-    Utilise le fichier config uploadé ici + les fichiers réseaux (.si2s) en Session.
+    Uses uploaded config file + network files (.si2s) in Session.
     """
     content = await file.read()
     try: 
         text_content = content.decode('utf-8')
         valid_config = ProjectConfig(**json.loads(text_content))
     except Exception as e: 
-        raise HTTPException(status_code=422, detail=f"Fichier config invalide: {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid config file: {e}")
         
     return _execute_calculation_logic(valid_config, token)
 
-# --- Data Explorer (Minimal pour éviter de casser le fichier) ---
+# --- Data Explorer (Minimal to avoid breaking file) ---
 def _collect_explorer_data(token, table_search, filename_filter):
     files = session_manager.get_files(token)
     if not files: return {}

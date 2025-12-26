@@ -15,23 +15,23 @@ def health():
 @router.get("/firebase-health")
 def firebase_check():
     """
-    Vérifie si la connexion Firebase Admin est active.
-    Permet de savoir si la variable FIREBASE_CREDENTIALS_JSON a bien été chargée.
+    Checks if Firebase Admin connection is active.
+    Indicates if FIREBASE_CREDENTIALS_JSON variable was loaded.
     """
     try:
-        # On essaie de récupérer l'application par défaut
+        # Attempt to retrieve default app
         app = firebase_admin.get_app()
         return {
             "status": "connected", 
-            "message": "Firebase Admin est actif ✅",
+            "message": "Firebase Admin is active ✅",
             "app_name": app.name,
-            # On vérifie si on est en mode Service Account (JSON) ou Auto (Google Cloud)
+            # Check if in Service Account (JSON) or Auto (Google Cloud) mode
             "credential_type": "Service Account JSON" if os.getenv("FIREBASE_CREDENTIALS_JSON") else "Automatic/None"
         }
     except ValueError:
         return {
             "status": "disconnected", 
-            "message": "⚠️ Firebase n'est pas initialisé. Vérifiez vos variables d'environnement."
+            "message": "⚠️ Firebase is not initialized. Check your environment variables."
         }
     except Exception as e:
         return {"status": "error", "detail": str(e)}

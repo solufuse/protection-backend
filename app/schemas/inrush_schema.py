@@ -4,30 +4,30 @@ from typing import List, Dict, Optional, Any
 class TransformerInrushParams(BaseModel):
     name: str
     
-    # On enlève 'alias="Sn"' ici pour ne pas le rendre obligatoire
-    sn_kva: float = Field(..., description="Puissance nominale en kVA (ou Sn)")
-    u_kv: float = Field(..., description="Tension nominale en kV (ou Un)")
+    # Removing 'alias="Sn"' here to make it optional
+    sn_kva: float = Field(..., description="Nominal Power in kVA (or Sn)")
+    u_kv: float = Field(..., description="Nominal Voltage in kV (or Un)")
     
-    # Valeurs par défaut
-    ratio_iencl: float = Field(8.0, description="Ratio Inrush (Défaut 8)")
-    tau_ms: float = Field(400.0, description="Tau (Défaut 400ms)")
+    # Default values
+    ratio_iencl: float = Field(8.0, description="Inrush Ratio (Default 8)")
+    tau_ms: float = Field(400.0, description="Tau (Default 400ms)")
 
-    # --- LE NETTOYEUR DE DONNÉES ---
-    # Ce validateur s'exécute AVANT que Pydantic ne vérifie les champs.
-    # Il normalise les clés (Sn -> sn_kva).
+    # --- DATA CLEANER ---
+    # This validator runs BEFORE Pydantic verifies fields.
+    # It normalizes keys (Sn -> sn_kva).
     @model_validator(mode='before')
     @classmethod
     def unify_keys(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            # Gestion de la Puissance (Sn -> sn_kva)
+            # Power Handling (Sn -> sn_kva)
             if 'Sn' in data and 'sn_kva' not in data:
                 data['sn_kva'] = data['Sn']
             
-            # Gestion de la Tension (Un -> u_kv)
+            # Voltage Handling (Un -> u_kv)
             if 'Un' in data and 'u_kv' not in data:
                 data['u_kv'] = data['Un']
                 
-            # Gestion des valeurs manquantes (Sécurité supplémentaire)
+            # Missing values handling (Extra security)
             if 'ratio_iencl' not in data:
                 data['ratio_iencl'] = 8.0
             if 'tau_ms' not in data:

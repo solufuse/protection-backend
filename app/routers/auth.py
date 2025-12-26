@@ -5,10 +5,10 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 @router.post("/login")
 def login():
     """
-    Endpoint sécurisé.
-    Ne renvoie PLUS le token maître.
+    Secure endpoint.
+    NO LONGER returns the master token.
     """
     return {
-        "message": "Authentification serveur active.",
-        "instruction": "Pour obtenir un token, connectez-vous via le Frontend (Google Auth) ou utilisez votre MASTER_TOKEN connu (via .env) pour les tests API."
+        "message": "Server authentication active.",
+        "instruction": "To get a token, login via Frontend (Google Auth) or use your known MASTER_TOKEN (via .env) for API tests."
     }
