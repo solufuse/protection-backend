@@ -5,6 +5,9 @@ import os
 from io import BytesIO
 
 def extract_data_from_db(file_stream: BytesIO) -> dict:
+    """
+    Service: Converts binary SQLite content into a clean Dictionary.
+    """
     with tempfile.NamedTemporaryFile(delete=False, suffix='.sqlite') as tmp_file:
         tmp_file.write(file_stream.getbuffer())
         tmp_path = tmp_file.name
