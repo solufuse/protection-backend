@@ -4,14 +4,12 @@ import firebase_admin
 from firebase_admin import credentials
 import os
 import json
+import importlib
+import pkgutil
+import sys
 
-# Imports des routeurs
-from routers import ingestion, loadflow, protection
-
-app = FastAPI(
-    title="Solufuse Electrical Backend",
-    version="4.0.0-restored"
-)
+# --- CONFIG ---
+app = FastAPI(title="Solufuse Backend API", version="5.0.0-hybrid")
 
 # --- CORS ---
 app.add_middleware(
@@ -30,22 +28,41 @@ def init_firebase():
             try:
                 cred = credentials.Certificate(json.loads(firebase_json))
                 firebase_admin.initialize_app(cred)
-                print("✅ Firebase initialized via Env Var")
                 return
             except: pass
         try:
             cred = credentials.ApplicationDefault()
             firebase_admin.initialize_app(cred)
-            print("✅ Firebase initialized via Default")
         except: pass
 
 init_firebase()
 
-# --- BRANCHEMENT ---
-app.include_router(ingestion.router) # Contient le vrai process_and_save
-app.include_router(loadflow.router)
-app.include_router(protection.router)
+# --- DYNAMIC ROUTER LOADER ---
+# C'est ici la magie : on charge tout ce qui est dans app/routers
+def include_routers_automatically():
+    from app import routers # On importe le package
+    package_path = routers.__path__
+    prefix = routers.__name__ + "."
+
+    print(f"🔍 Scanning routers in {package_path}...")
+
+    for _, name, _ in pkgutil.iter_modules(package_path):
+        try:
+            # On importe le module (ex: app.routers.loadflow)
+            module = importlib.import_module(prefix + name)
+            
+            # On cherche s'il y a un objet 'router' dedans
+            if hasattr(module, "router"):
+                print(f"✅ Loading router: {name}")
+                app.include_router(module.router)
+            else:
+                print(f"⚠️  Skipping {name}: No 'router' object found.")
+        except Exception as e:
+            print(f"❌ Error loading module {name}: {e}")
+
+# Lancement du scan
+include_routers_automatically()
 
 @app.get("/")
 def health_check():
-    return {"status": "Online", "service": "Solufuse Backend Restored"}
+    return {"status": "Online", "mode": "Dynamic Router Loading"}
