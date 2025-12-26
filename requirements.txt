@@ -8,3 +8,6 @@ pandas
 python-multipart
 
 openpyxl
+
+firebase-admin==6.2.0
+requests
