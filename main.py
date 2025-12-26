@@ -1,19 +1,23 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 import firebase_admin
-from firebase_admin import credentials, firestore
+from firebase_admin import credentials, firestore, storage
 import requests
 import io
+import json
+import uuid
 import sys
 
-# Import the converter module
+# Import the converter module (assumed to be present from previous step)
 from db_converter import extract_data_from_db
 
 # --- CONFIGURATION & INIT ---
 
-app = FastAPI(title="Solufuse Backend API", version="1.0.0")
+app = FastAPI(title="Solufuse Backend API", version="1.1.0")
 
 # Initialize Firebase Admin SDK
+# Note: For Storage to work with default bucket, ensure App Engine is enabled 
+# or pass {'storageBucket': 'your-project-id.appspot.com'} if not auto-detected.
 if not firebase_admin._apps:
     cred = credentials.ApplicationDefault()
     firebase_admin.initialize_app(cred)
@@ -32,11 +36,70 @@ class ProcessResponse(BaseModel):
     message: str
     doc_id: str | None = None
 
+# --- HELPER FUNCTIONS ---
+
+def save_smartly(user_id: str, data: dict, file_type: str) -> str:
+    """
+    Analyzes the size of the data.
+    - If < 900KB: Saves directly to Firestore.
+    - If > 900KB: Uploads JSON to Storage and saves the path in Firestore.
+    
+    Returns:
+        str: The ID of the Firestore document created.
+    """
+    
+    # 1. Serialize data to measure size
+    json_str = json.dumps(data)
+    size_in_bytes = len(json_str.encode('utf-8'))
+    
+    # Firestore limit is 1MiB (1,048,576 bytes). We use 900KB as a safety margin.
+    LIMIT_BYTES = 900 * 1024 
+    
+    collection_ref = db.collection("users").document(user_id).collection("configurations")
+    
+    # Base document metadata
+    doc_data = {
+        "processed": True,
+        "source_type": file_type,
+        "created_at": firestore.SERVER_TIMESTAMP,
+        "is_large_file": False,
+        "storage_path": None,
+        "raw_data": None
+    }
+
+    if size_in_bytes < LIMIT_BYTES:
+        print(f"✅ Data is small ({size_in_bytes} bytes). Saving to Firestore.")
+        doc_data["raw_data"] = data
+        doc_ref = collection_ref.document()
+        doc_ref.set(doc_data)
+        
+    else:
+        print(f"⚠️ Data is huge ({size_in_bytes} bytes). Offloading to Storage.")
+        
+        # Define storage path for the JSON result
+        file_uuid = str(uuid.uuid4())
+        blob_path = f"users/{user_id}/processed_results/{file_uuid}.json"
+        
+        # Upload to Firebase Storage
+        bucket = storage.bucket() # Uses default bucket
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(json_str, content_type='application/json')
+        
+        # Update metadata for Firestore
+        doc_data["is_large_file"] = True
+        doc_data["storage_path"] = blob_path
+        # We do NOT include "raw_data" here to keep the document light
+        
+        doc_ref = collection_ref.document()
+        doc_ref.set(doc_data)
+        
+    return doc_ref.id
+
 # --- CORE LOGIC ---
 
 def process_and_save(user_id: str, file_url: str, file_type: str):
     """
-    Downloads the file into memory, processes it, and saves result to Firestore.
+    Downloads, processes, and saves result using smart storage strategy.
     """
     try:
         print(f"Starting process for user: {user_id}, type: {file_type}")
@@ -47,32 +110,26 @@ def process_and_save(user_id: str, file_url: str, file_type: str):
         
         file_in_memory = io.BytesIO(response.content)
         
-        # 2. Extract data using the converter
+        # 2. Extract data via db_converter
         print("Extracting data via db_converter...")
-        
-        # This function handles the temporary file creation/deletion internally
         extracted_content = extract_data_from_db(file_in_memory)
         
-        result_data = {
-            "processed": True,
-            "source_type": file_type,
-            "raw_data": extracted_content # Be careful: Firetore has a 1MB limit per doc.
-        }
+        # 3. Save result (Handle size limits automatically)
+        doc_id = save_smartly(user_id, extracted_content, file_type)
         
-        # 3. Save to Firestore
-        # Warning: If data is > 1MB, we should save back to Storage as JSON.
-        # For now, assuming small config files.
-        doc_ref = db.collection("users").document(user_id).collection("configurations").document()
-        doc_ref.set(result_data)
-        
-        print(f"Data saved to Firestore: {doc_ref.id}")
-        return doc_ref.id
+        print(f"Process completed. Document ID: {doc_id}")
+        return doc_id
 
     except Exception as e:
         print(f"Error processing file: {str(e)}")
-        # Log error to Firestore to inform frontend?
+        
+        # Log error to Firestore
         error_ref = db.collection("users").document(user_id).collection("errors").document()
-        error_ref.set({"error": str(e), "file_url": file_url})
+        error_ref.set({
+            "error": str(e), 
+            "file_url": file_url,
+            "timestamp": firestore.SERVER_TIMESTAMP
+        })
         raise e
 
 # --- ENDPOINTS ---
