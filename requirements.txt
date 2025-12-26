@@ -4,3 +4,5 @@ pydantic
 firebase-admin
 requests
 pandas
+
+python-multipart
