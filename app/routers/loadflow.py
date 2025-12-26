@@ -143,7 +143,7 @@ async def run_loadflow_winners_only(token: str = Depends(get_current_token)):
     return loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
 
 @router.get("/export")
-async def export_all_files(format: str = Query("xlsx", regex="^(xlsx|json)$"), token: str = Depends(get_current_token)):
+async def export_all_files(format: str = Query("xlsx", pattern="^(xlsx|json)$"), token: str = Depends(get_current_token)):
     """
     Download global report (All Files).
     Filename format: LF_export-all_{project_name}_{date}.xlsx
@@ -162,7 +162,7 @@ async def export_all_files(format: str = Query("xlsx", regex="^(xlsx|json)$"), t
     return generate_flat_excel(data, f"{base_name}.xlsx")
 
 @router.get("/export-win")
-async def export_winners_flat(format: str = Query("xlsx", regex="^(xlsx|json)$"), token: str = Depends(get_current_token)):
+async def export_winners_flat(format: str = Query("xlsx", pattern="^(xlsx|json)$"), token: str = Depends(get_current_token)):
     """
     Download report for WINNERS ONLY.
     Filename format: LF_export-win_{project_name}_{date}.xlsx
