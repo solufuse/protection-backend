@@ -4,3 +4,6 @@ python-multipart
 requests
 pydantic
 firebase-admin==6.2.0
+pandas
+numpy
+openpyxl
