@@ -1,9 +1,6 @@
 fastapi
 uvicorn
-python-multipart
-pandas
-openpyxl
-numpy
-python-jose[cryptography]
-
+pydantic
 firebase-admin
+requests
+pandas
