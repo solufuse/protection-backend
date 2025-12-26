@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from app.core.security import get_current_token
 from app.services import session_manager
-from app.calculations import si2s_converter
+from app.calculations import db_converter
 import pandas as pd
 import io
 import json
@@ -84,7 +84,7 @@ def preview_data(filename: str = Query(...), token: str = Depends(get_current_to
     if not is_supported_db(real_name):
          raise HTTPException(status_code=400, detail="Unsupported file format (SI2S, LF1S, MDB only).")
 
-    dfs = si2s_converter.extract_data_from_si2s(content)
+    dfs = db_converter.extract_data_from_db(content)
     if dfs is None: raise HTTPException(status_code=500, detail="Error reading SQLite database.")
         
     preview = {
@@ -106,15 +106,15 @@ def download_single(format: str, filename: str = Query(...), token: str = Depend
     """
     real_name, content = get_specific_file(token, filename)
     
-    # Reuse SI2S converter
-    dfs = si2s_converter.extract_data_from_si2s(content)
+    # Reuse DB converter
+    dfs = db_converter.extract_data_from_db(content)
     if not dfs: raise HTTPException(status_code=400, detail="File empty or unreadable.")
 
     # Get Metadata for naming
     p_name, p_date = get_export_metadata(token)
 
     if format == "xlsx":
-        excel_stream = si2s_converter.generate_excel_bytes(dfs)
+        excel_stream = db_converter.generate_excel_bytes(dfs)
         
         # Create base name from original file
         base_name = os.path.basename(real_name) 
@@ -160,7 +160,7 @@ def download_all_zip(format: str, token: str = Depends(get_current_token)):
             if not is_supported_db(filename):
                 continue
                 
-            dfs = si2s_converter.extract_data_from_si2s(content)
+            dfs = db_converter.extract_data_from_db(content)
             if not dfs: continue
             
             # Use short name for files inside the ZIP
@@ -169,7 +169,7 @@ def download_all_zip(format: str, token: str = Depends(get_current_token)):
                 base_name = base_name.lower().replace(ext, "")
             
             if format == "xlsx":
-                excel_bytes = si2s_converter.generate_excel_bytes(dfs)
+                excel_bytes = db_converter.generate_excel_bytes(dfs)
                 zip_file.writestr(f"{base_name}.xlsx", excel_bytes.getvalue())
                 files_processed += 1
                 

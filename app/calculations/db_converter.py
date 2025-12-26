@@ -4,12 +4,13 @@ import tempfile
 import os
 import io
 
-def extract_data_from_si2s(file_content: bytes):
+def extract_data_from_db(file_content: bytes):
     """
-    Extracts all tables from SI2S (SQLite) and returns a dictionary of DataFrames.
+    Extracts all tables from a SQLite-based database (SI2S, LF1S) 
+    and returns a dictionary of DataFrames.
     """
     # 1. Create a temporary file because sqlite3 requires a disk path
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".SI2S") as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".db_tmp") as tmp:
         tmp.write(file_content)
         tmp_path = tmp.name
 

@@ -1,7 +1,7 @@
 import pandas as pd
 import math
 import os
-from app.calculations import si2s_converter
+from app.calculations import db_converter
 from app.schemas.loadflow_schema import TransformerData, SwingBusInfo, StudyCaseInfo
 
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
@@ -48,7 +48,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
 
         # --- 1. DATA EXTRACTION ---
         try:
-            dfs = si2s_converter.extract_data_from_si2s(content)
+            dfs = db_converter.extract_data_from_db(content)
             if dfs and "data" in dfs and isinstance(dfs["data"], dict): dfs = dfs["data"]
         except: dfs = None
             

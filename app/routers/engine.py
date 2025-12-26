@@ -4,7 +4,7 @@ from typing import Optional
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
-from app.calculations import si2s_converter, topology_manager
+from app.calculations import db_converter, topology_manager
 import json
 import pandas as pd
 import io
@@ -22,7 +22,7 @@ def get_merged_dataframes_for_calc(token: str):
     merged_dfs = {}
     for name, content in files.items():
         if is_supported(name):
-            dfs = si2s_converter.extract_data_from_si2s(content)
+            dfs = db_converter.extract_data_from_db(content)
             if dfs:
                 for t, df in dfs.items():
                     if t not in merged_dfs: merged_dfs[t] = []
@@ -116,7 +116,7 @@ def _collect_explorer_data(token, table_search, filename_filter):
     for fname, content in files.items():
         if filename_filter and filename_filter.lower() not in fname.lower(): continue
         if not is_supported(fname): continue
-        dfs = si2s_converter.extract_data_from_si2s(content)
+        dfs = db_converter.extract_data_from_db(content)
         if dfs:
             file_results = {}
             for table_name, df in dfs.items():
