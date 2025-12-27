@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from app.services import session_manager
 from app.calculations import db_converter
 from app.services.session_manager import get_absolute_file_path
+from app.core.auth_utils import get_uid_from_token # IMPORT DU FIX
 import pandas as pd
 import io
 import json
@@ -11,11 +12,16 @@ import os
 
 router = APIRouter(prefix="/ingestion", tags=["Ingestion"])
 
-# Helper local pour récupérer via Token URL
-def get_file_content_via_token(token: str, filename: str):
-    file_path = get_absolute_file_path(token, filename)
+def get_file_content_via_token_raw(token_raw: str, filename: str):
+    # CORRECTION : Extraction UID
+    user_id = get_uid_from_token(token_raw)
+    
+    # Force reload si nécessaire
+    session_manager.get_files(user_id)
+    
+    file_path = get_absolute_file_path(user_id, filename)
     if not os.path.exists(file_path):
-        raise HTTPException(404, "File not found")
+        raise HTTPException(404, f"File not found in storage for user {user_id}")
     with open(file_path, "rb") as f:
         return filename, f.read()
 
@@ -23,12 +29,11 @@ def is_db(name): return name.lower().endswith(('.si2s', '.mdb', '.lf1s', '.json'
 
 @router.get("/preview")
 def preview_data(filename: str = Query(...), token: str = Query(...)):
-    # Modifié pour prendre le TOKEN en paramètre URL (Query)
-    name, content = get_file_content_via_token(token, filename)
+    name, content = get_file_content_via_token_raw(token, filename)
     
     if name.lower().endswith('.json'):
-        # Support direct des JSON
-        return JSONResponse(json.loads(content))
+        try: return JSONResponse(json.loads(content))
+        except: raise HTTPException(400, "Invalid JSON")
 
     if not is_db(name): raise HTTPException(400, "Format not supported")
     
@@ -42,8 +47,7 @@ def preview_data(filename: str = Query(...), token: str = Query(...)):
 
 @router.get("/download/{format}")
 def download_single(format: str, filename: str = Query(...), token: str = Query(...)):
-    # Token en paramètre URL aussi pour faciliter les liens href
-    name, content = get_file_content_via_token(token, filename)
+    name, content = get_file_content_via_token_raw(token, filename)
     dfs = db_converter.extract_data_from_db(content)
     if not dfs: raise HTTPException(400, "Unreadable")
     
@@ -60,8 +64,8 @@ def download_single(format: str, filename: str = Query(...), token: str = Query(
 
 @router.get("/download-all/{format}")
 def download_all_zip(format: str, token: str = Query(...)):
-    # Token en URL pour download all aussi
-    files = session_manager.get_files(token)
+    user_id = get_uid_from_token(token)
+    files = session_manager.get_files(user_id)
     if not files: raise HTTPException(400, "Session empty")
     
     zip_buffer = io.BytesIO()

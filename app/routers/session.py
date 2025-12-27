@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.services.session_manager import get_user_storage_path, get_absolute_file_path
+from app.core.auth_utils import get_uid_from_token # IMPORT DU FIX
 from typing import List
 import zipfile
 import io
@@ -13,6 +14,8 @@ router = APIRouter(prefix="/session", tags=["Session Storage"])
 
 @router.post("/upload")
 async def upload_files(files: List[UploadFile] = File(...), token: str = Depends(get_current_token)):
+    # Ici 'token' vient de Depends(get_current_token) qui retourne DEJA l'UID (selon votre config security)
+    # Donc pas de changement ici si get_current_token fait son job.
     count = 0
     for file in files:
         content = await file.read()
@@ -33,6 +36,9 @@ async def upload_files(files: List[UploadFile] = File(...), token: str = Depends
 
 @router.get("/details")
 def get_details(token: str = Depends(get_current_token)):
+    # Force reload
+    session_manager.get_files(token)
+    
     user_storage_dir = get_user_storage_path(token)
     files_info = []
     
@@ -43,16 +49,18 @@ def get_details(token: str = Depends(get_current_token)):
                 full_path = os.path.join(root, name)
                 rel_path = os.path.relpath(full_path, user_storage_dir).replace("\\", "/")
                 
-                # Récupération de la date de modification
-                timestamp = os.path.getmtime(full_path)
-                dt_object = datetime.datetime.fromtimestamp(timestamp)
-                formatted_date = dt_object.strftime("%Y-%m-%d %H:%M:%S")
+                # Date
+                try:
+                    timestamp = os.path.getmtime(full_path)
+                    dt_object = datetime.datetime.fromtimestamp(timestamp)
+                    formatted_date = dt_object.strftime("%Y-%m-%d %H:%M:%S")
+                except: formatted_date = "-"
 
                 files_info.append({
                     "path": rel_path,
                     "filename": name,
                     "size": os.path.getsize(full_path),
-                    "uploaded_at": formatted_date, # NOUVEAU CHAMP
+                    "uploaded_at": formatted_date,
                     "content_type": "application/octet-stream"
                 })
     
@@ -60,18 +68,18 @@ def get_details(token: str = Depends(get_current_token)):
 
 @router.get("/download")
 def download_raw_file(filename: str = Query(...), token: str = Query(None)): 
-    # NOTE: On accepte le token en Query param pour faciliter les liens directs
-    # Si token n'est pas dans Query, on pourrait le prendre via Depends(get_current_token) mais 
-    # pour un lien href simple, le Query param est plus facile.
-    # Dans une app stricte, on garderait le header, mais ici c'est demandé.
-    
-    if not token:
-        raise HTTPException(status_code=401, detail="Token missing in query")
+    if not token: raise HTTPException(401, "Token missing")
 
-    file_path = get_absolute_file_path(token, filename)
+    # CORRECTION : ON DECODE LE TOKEN POUR AVOIR L'UID
+    user_id = get_uid_from_token(token)
+
+    file_path = get_absolute_file_path(user_id, filename)
     
     if not os.path.exists(file_path):
-         raise HTTPException(status_code=404, detail="File not found")
+         # Tentative reload
+         session_manager.get_files(user_id)
+         if not os.path.exists(file_path):
+             raise HTTPException(status_code=404, detail="File not found")
              
     return FileResponse(file_path, filename=os.path.basename(filename))
 
