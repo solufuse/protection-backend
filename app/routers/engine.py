@@ -27,10 +27,9 @@ def get_merged_dfs(token):
 @router.post("/run")
 async def run_session(token: str = Depends(get_current_token)):
     files = session_manager.get_files(token)
-    if "config.json" not in files: raise HTTPException(404, "config.json manquant")
+    if "config.json" not in files: raise HTTPException(404, "config.json missing")
     try: config = ProjectConfig(**json.loads(files["config.json"].decode()))
-    except: raise HTTPException(422, "Config invalide")
-    
+    except: raise HTTPException(422, "Invalid Config")
     dfs = get_merged_dfs(token)
     updated = topology_manager.resolve_all(config, dfs)
     return {"status": "success", "plans": updated.plans}

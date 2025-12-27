@@ -27,7 +27,7 @@ async def upload_files(files: List[UploadFile] = File(...), token: str = Depends
         else:
             session_manager.add_file(token, file.filename, content)
             count += 1
-    return {"message": f"{count} fichiers sauvegardés."}
+    return {"message": f"{count} files saved."}
 
 @router.get("/details")
 def get_details(token: str = Depends(get_current_token)):
@@ -47,11 +47,11 @@ def get_details(token: str = Depends(get_current_token)):
 
 @router.get("/download")
 def download_raw_file(filename: str = Query(...), token: str = Depends(get_current_token)):
-    """Télécharge un fichier brut depuis le dossier utilisateur."""
-    safe_filename = os.path.basename(filename) # Sécurité
+    # This endpoint is crucial for the "RAW" button in frontend
+    safe_filename = os.path.basename(filename)
     file_path = os.path.join("/app/storage", token, safe_filename)
     if not os.path.exists(file_path):
-         raise HTTPException(status_code=404, detail=f"Fichier '{safe_filename}' introuvable.")
+         raise HTTPException(status_code=404, detail=f"File '{safe_filename}' not found.")
     return FileResponse(file_path, filename=safe_filename)
 
 @router.delete("/file/{path:path}")
