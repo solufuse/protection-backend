@@ -4,13 +4,13 @@ from typing import Optional
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
-# Using db_converter to match existing files
+# PATCH: Use db_converter (si2s_converter does not exist in this repo)
 from app.calculations import db_converter, topology_manager
 import json
 import pandas as pd
 import io
 
-# CHANGED PREFIX HERE
+# PREFIX UPDATED to /protection
 router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
 
 # --- HELPERS ---
@@ -24,6 +24,7 @@ def get_merged_dataframes_for_calc(token: str):
     merged_dfs = {}
     for name, content in files.items():
         if is_supported(name):
+            # PATCH: Using db_converter
             dfs = db_converter.extract_data_from_db(content)
             if dfs:
                 for t, df in dfs.items():
@@ -48,7 +49,7 @@ def _execute_calculation_logic(config: ProjectConfig, token: str):
 
 def get_config_from_session(token: str) -> ProjectConfig:
     files = session_manager.get_files(token)
-    if not files: raise HTTPException(status_code=400, detail="Session vide.")
+    if not files: raise HTTPException(status_code=400, detail="Session is empty.")
     
     target_content = None
     if "config.json" in files:
@@ -60,7 +61,7 @@ def get_config_from_session(token: str) -> ProjectConfig:
                 break
     
     if target_content is None:
-        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé.")
+        raise HTTPException(status_code=404, detail="No 'config.json' found in session.")
 
     try:
         if isinstance(target_content, bytes):
@@ -70,7 +71,7 @@ def get_config_from_session(token: str) -> ProjectConfig:
         data = json.loads(text_content)
         return ProjectConfig(**data)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Config invalide : {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid Config JSON: {e}")
 
 # --- ROUTES ---
 
@@ -90,7 +91,7 @@ async def run_via_file_upload(file: UploadFile = File(...), token: str = Depends
         text_content = content.decode('utf-8')
         valid_config = ProjectConfig(**json.loads(text_content))
     except Exception as e: 
-        raise HTTPException(status_code=422, detail=f"Fichier config invalide: {e}")
+        raise HTTPException(status_code=422, detail=f"Invalid config file: {e}")
         
     return _execute_calculation_logic(valid_config, token)
 
