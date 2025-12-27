@@ -2,12 +2,12 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Query
 from fastapi.responses import FileResponse
 from app.core.security import get_current_token
 from app.services import session_manager
-# On importe les fonctions utilitaires pour garantir la cohérence des chemins
 from app.services.session_manager import get_user_storage_path, get_absolute_file_path
 from typing import List
 import zipfile
 import io
 import os
+import datetime
 
 router = APIRouter(prefix="/session", tags=["Session Storage"])
 
@@ -42,26 +42,37 @@ def get_details(token: str = Depends(get_current_token)):
                 if name.startswith('.'): continue
                 full_path = os.path.join(root, name)
                 rel_path = os.path.relpath(full_path, user_storage_dir).replace("\\", "/")
+                
+                # Récupération de la date de modification
+                timestamp = os.path.getmtime(full_path)
+                dt_object = datetime.datetime.fromtimestamp(timestamp)
+                formatted_date = dt_object.strftime("%Y-%m-%d %H:%M:%S")
+
                 files_info.append({
-                    "path": rel_path, # Path utilisé pour la suppression
-                    "filename": name, # Nom d'affichage
+                    "path": rel_path,
+                    "filename": name,
                     "size": os.path.getsize(full_path),
+                    "uploaded_at": formatted_date, # NOUVEAU CHAMP
                     "content_type": "application/octet-stream"
                 })
     
     return {"active": True, "files": files_info}
 
-# --- C'EST CETTE FONCTION QUI MANQUAIT ---
 @router.get("/download")
-def download_raw_file(filename: str = Query(...), token: str = Depends(get_current_token)):
-    # Utilisation de la fonction centralisée pour trouver le fichier
+def download_raw_file(filename: str = Query(...), token: str = Query(None)): 
+    # NOTE: On accepte le token en Query param pour faciliter les liens directs
+    # Si token n'est pas dans Query, on pourrait le prendre via Depends(get_current_token) mais 
+    # pour un lien href simple, le Query param est plus facile.
+    # Dans une app stricte, on garderait le header, mais ici c'est demandé.
+    
+    if not token:
+        raise HTTPException(status_code=401, detail="Token missing in query")
+
     file_path = get_absolute_file_path(token, filename)
     
     if not os.path.exists(file_path):
-         # Debug log pour les logs serveur
-         print(f"❌ File not found: {file_path}")
-         raise HTTPException(status_code=404, detail="Fichier introuvable sur le disque.")
-         
+         raise HTTPException(status_code=404, detail="File not found")
+             
     return FileResponse(file_path, filename=os.path.basename(filename))
 
 @router.delete("/file/{path:path}")
