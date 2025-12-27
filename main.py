@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import system, auth, session, ingestion, engine, inrush, extraction, loadflow
+# Imports of all routers
+from app.routers import system, auth, session, ingestion, engine, protection, inrush, extraction, loadflow
 
 app = FastAPI(title="Solufuse Backend V2")
 
@@ -12,11 +13,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- ROUTERS ---
 app.include_router(system.router)
 app.include_router(auth.router)
 app.include_router(session.router)
 app.include_router(ingestion.router)
 app.include_router(engine.router)
+app.include_router(protection.router)  # ✅ Included correctly
 app.include_router(inrush.router)
 app.include_router(extraction.router)
 app.include_router(loadflow.router)
