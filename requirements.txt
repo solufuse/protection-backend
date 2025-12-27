@@ -1,8 +1,9 @@
 fastapi
 uvicorn
 python-multipart
-firebase-admin
-requests
 pandas
 openpyxl
-python-docx
+numpy
+python-jose[cryptography]
+
+firebase-admin

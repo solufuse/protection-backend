@@ -4,43 +4,42 @@ import tempfile
 import os
 import io
 
-def extract_data_from_db(file_content: bytes):
+def extract_data_from_si2s(file_content: bytes):
     """
-    Extracts all tables from a SQLite-based database (SI2S, LF1S) 
-    and returns a dictionary of DataFrames.
+    Extrait toutes les tables du SI2S (SQLite) et renvoie un dictionnaire de DataFrames.
     """
-    # 1. Create a temporary file because sqlite3 requires a disk path
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".db_tmp") as tmp:
+    # 1. Création d'un fichier temporaire car sqlite3 a besoin d'un chemin disque
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".SI2S") as tmp:
         tmp.write(file_content)
         tmp_path = tmp.name
 
     data_frames = {}
     
     try:
-        # 2. Connect to the database
+        # 2. Connexion à la base de données
         conn = sqlite3.connect(tmp_path)
         cursor = conn.cursor()
         
-        # 3. List all tables
+        # 3. Lister toutes les tables
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
         tables = [row[0] for row in cursor.fetchall()]
         
-        # 4. Read each table into Pandas
+        # 4. Lire chaque table vers Pandas
         for table in tables:
             try:
                 df = pd.read_sql_query(f'SELECT * FROM "{table}"', conn)
                 data_frames[table] = df
             except Exception as e:
-                print(f"Error reading table {table}: {e}")
+                print(f"Erreur lecture table {table}: {e}")
                 
         conn.close()
         
     except Exception as e:
-        print(f"Global SQLite error: {e}")
+        print(f"Erreur globale SQLite: {e}")
         return None
         
     finally:
-        # 5. Cleanup (Remove temp file)
+        # 5. Nettoyage (Suppression du fichier temp)
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
             
@@ -48,20 +47,20 @@ def extract_data_from_db(file_content: bytes):
 
 def generate_excel_bytes(data_frames: dict) -> io.BytesIO:
     """
-    Takes the DataFrame dictionary and returns an Excel file in memory (BytesIO).
+    Prend le dictionnaire de DataFrames et renvoie un fichier Excel en mémoire (BytesIO).
     """
     output = io.BytesIO()
     
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         if not data_frames:
-            # Create an empty sheet if nothing to write
-            pd.DataFrame({'Info': ['File Empty or Unreadable']}).to_excel(writer, sheet_name='Error')
+            # Créer un onglet vide si rien à écrire
+            pd.DataFrame({'Info': ['Fichier Vide ou Illisible']}).to_excel(writer, sheet_name='Erreur')
         else:
             for table_name, df in data_frames.items():
-                # Excel limits sheet names to 31 chars
+                # Excel limite les noms d'onglets à 31 caractères
                 sheet_name = table_name[:31]
                 
-                # Handle duplicate names (rare but possible)
+                # Gestion des doublons de noms (rare mais possible)
                 count = 1
                 base_name = sheet_name
                 while sheet_name in writer.book.sheetnames:
@@ -70,6 +69,6 @@ def generate_excel_bytes(data_frames: dict) -> io.BytesIO:
                 
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
     
-    # Rewind pointer to the beginning of the memory file
+    # Rembobiner le pointeur au début du fichier mémoire
     output.seek(0)
     return output

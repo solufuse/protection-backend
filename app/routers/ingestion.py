@@ -1,117 +1,112 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
-from fastapi.responses import StreamingResponse
-import os, json, uuid, requests, tempfile, shutil, zipfile, io, asyncio
-from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse, JSONResponse
+from app.core.security import get_current_token
+from app.services import session_manager
+from app.calculations import si2s_converter
 import pandas as pd
+import io
+import json
+import zipfile
 
-try:
-    from app.firebase_config import db, bucket
-    from app.core.db_converter import DBConverter
-    from app.core.memory import SESSIONS, CLOUD_SETTINGS
-except ImportError:
-    from firebase_config import db, bucket
-    from core.db_converter import DBConverter
-    from core.memory import SESSIONS, CLOUD_SETTINGS
+router = APIRouter(prefix="/ingestion", tags=["Ingestion & Export"])
 
-router = APIRouter(prefix="/ingestion", tags=["ingestion"])
+# --- HELPERS ---
+def get_specific_file(token: str, filename: str):
+    files = session_manager.get_files(token)
+    if not files: raise HTTPException(status_code=400, detail="Aucun fichier en session.")
+    if filename not in files:
+        for existing in files.keys():
+            if existing.lower() == filename.lower(): return existing, files[existing]
+        raise HTTPException(status_code=404, detail=f"Fichier '{filename}' introuvable.")
+    return filename, files[filename]
 
-# --- TASK: SYNC CLOUD AFTER 5 SECONDS ---
-async def background_cloud_sync(user_id, buffer_path, result_data, file_meta):
-    """
-    Background task that waits 5 seconds, then uploads to Cloud
-    ONLY if cloud is still enabled.
-    """
-    await asyncio.sleep(5) # Delay buffer
+def is_supported_db(filename: str) -> bool:
+    ext = filename.lower()
+    return ext.endswith('.si2s') or ext.endswith('.mdb') or ext.endswith('.lf1s')
+
+# --- ROUTES ---
+
+@router.get("/preview")
+def preview_data(filename: str = Query(...), token: str = Depends(get_current_token)):
+    real_name, content = get_specific_file(token, filename)
     
-    if not CLOUD_SETTINGS.get(user_id, True):
-        print(f"   💡 Cloud Disabled: Skipping sync for {file_meta['original_name']}")
-        if os.path.exists(buffer_path): os.remove(buffer_path)
-        return
+    if not is_supported_db(real_name):
+         raise HTTPException(status_code=400, detail="Fichier non supporté (SI2S, LF1S, MDB uniquement).")
 
-    try:
-        # 1. Upload Original Binary
-        bucket.blob(file_meta['raw_file_path']).upload_from_filename(buffer_path)
-        # 2. Upload Processed JSON
-        bucket.blob(file_meta['storage_path']).upload_from_string(
-            json.dumps(result_data, default=str), content_type='application/json'
+    dfs = si2s_converter.extract_data_from_si2s(content)
+    if dfs is None: raise HTTPException(status_code=500, detail="Erreur lecture SQLite.")
+        
+    preview = {"filename": real_name, "tables": {}}
+    for table, df in dfs.items():
+        df_clean = df.head(10).where(pd.notnull(df), None)
+        preview["tables"][table] = df_clean.to_dict(orient="records")
+    return preview
+
+@router.get("/download/{format}")
+def download_single(format: str, filename: str = Query(...), token: str = Depends(get_current_token)):
+    real_name, content = get_specific_file(token, filename)
+    
+    # On réutilise le convertisseur SI2S car LF1S est aussi du SQLite
+    dfs = si2s_converter.extract_data_from_si2s(content)
+    if not dfs: raise HTTPException(status_code=400, detail="Fichier vide ou illisible.")
+
+    if format == "xlsx":
+        excel_stream = si2s_converter.generate_excel_bytes(dfs)
+        # On remplace l'extension source par .xlsx
+        new_name = real_name
+        for ext in ['.si2s', '.lf1s', '.mdb']: # Nettoyage extension
+            new_name = new_name.lower().replace(ext, "")
+        new_name += ".xlsx"
+        
+        return StreamingResponse(
+            excel_stream, 
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={new_name}"}
         )
-        # 3. Update Firestore
-        db_meta = file_meta.copy()
-        if 'data_preview' in db_meta: del db_meta['data_preview']
-        db_meta['cloud_synced'] = True
-        db.collection('users').document(user_id).collection('configurations').document(file_meta['id']).set(db_meta)
-        
-        # Update RAM status
-        if user_id in SESSIONS:
-            for f in SESSIONS[user_id]:
-                if f['id'] == file_meta['id']: f['cloud_synced'] = True
-        
-        print(f"   ☁️ Cloud Sync Completed: {file_meta['original_name']}")
-    except Exception as e:
-        print(f"   ❌ Cloud Error: {e}")
-    finally:
-        if os.path.exists(buffer_path): os.remove(buffer_path)
+    elif format == "json":
+        data = {t: df.where(pd.notnull(df), None).to_dict(orient="records") for t, df in dfs.items()}
+        return JSONResponse(content={"filename": real_name, "data": data})
+    else:
+        raise HTTPException(status_code=400, detail="Format invalide (xlsx/json)")
 
-def process_single_file(user_id, file_path, original_filename, bt: BackgroundTasks):
-    # 1. CONVERSION IMMEDIATE (RAM FIRST)
-    result_data = DBConverter.convert_to_json(file_path, original_filename)
-    f_id = str(uuid.uuid4())
-    _, ext = os.path.splitext(original_filename)
+@router.get("/download-all/{format}")
+def download_all_zip(format: str, token: str = Depends(get_current_token)):
+    files = session_manager.get_files(token)
+    if not files:
+        raise HTTPException(status_code=400, detail="Aucun fichier en session.")
 
-    file_meta = {
-        'id': f_id,
-        'created_at': datetime.utcnow(),
-        'source_type': ext.replace('.', ''),
-        'original_name': original_filename,
-        'storage_path': f"processed/{user_id}/{f_id}.json",
-        'raw_file_path': f"raw_uploads/{user_id}/{f_id}{ext}",
-        'cloud_synced': False,
-        'data_preview': result_data 
-    }
+    zip_buffer = io.BytesIO()
+    files_processed = 0
+    
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for filename, content in files.items():
+            if not is_supported_db(filename):
+                continue
+                
+            dfs = si2s_converter.extract_data_from_si2s(content)
+            if not dfs: continue
+            
+            base_name = filename
+            for ext in ['.si2s', '.lf1s', '.mdb']:
+                base_name = base_name.lower().replace(ext, "")
+            
+            if format == "xlsx":
+                excel_bytes = si2s_converter.generate_excel_bytes(dfs)
+                zip_file.writestr(f"{base_name}.xlsx", excel_bytes.getvalue())
+                files_processed += 1
+                
+            elif format == "json":
+                data = {t: df.where(pd.notnull(df), None).to_dict(orient="records") for t, df in dfs.items()}
+                json_str = json.dumps(data, indent=2, default=str)
+                zip_file.writestr(f"{base_name}.json", json_str)
+                files_processed += 1
+    
+    if files_processed == 0:
+        raise HTTPException(status_code=400, detail="Aucun fichier valide (SI2S/LF1S) trouvé.")
 
-    # Injection immédiate en RAM
-    if user_id not in SESSIONS: SESSIONS[user_id] = []
-    SESSIONS[user_id].insert(0, file_meta)
-    print(f"   🧠 Injected in RAM: {original_filename}")
-
-    # 2. PLANIFICATION CLOUD (Si activé)
-    if CLOUD_SETTINGS.get(user_id, True):
-        # On sécurise une copie du fichier pour le sync asynchrone
-        buffer_dir = "/tmp/solufuse_buffer"
-        if not os.path.exists(buffer_dir): os.makedirs(buffer_dir)
-        buffer_path = os.path.join(buffer_dir, f"sync_{f_id}{ext}")
-        shutil.copy(file_path, buffer_path)
-        
-        bt.add_task(background_cloud_sync, user_id, buffer_path, result_data, file_meta)
-
-@router.post("/process")
-async def start_process(user_id: str, file_url: str, file_type: str, bt: BackgroundTasks):
-    temp_dir = tempfile.mkdtemp()
-    try:
-        path = os.path.join(temp_dir, "input")
-        r = requests.get(file_url); open(path, 'wb').write(r.content)
-        if zipfile.is_zipfile(path):
-            with zipfile.ZipFile(path, 'r') as z:
-                for m in sorted(z.namelist()):
-                    if not m.startswith('__') and not m.endswith('/'):
-                        z.extract(m, temp_dir)
-                        process_single_file(user_id, os.path.join(temp_dir, m), os.path.basename(m), bt)
-        else:
-            process_single_file(user_id, path, f"upload.{file_type}", bt)
-    finally: shutil.rmtree(temp_dir)
-    return {"status": "in_ram"}
-
-@router.post("/toggle-cloud")
-async def toggle_cloud(user_id: str, enabled: bool):
-    CLOUD_SETTINGS[user_id] = enabled
-    return {"cloud_enabled": enabled}
-
-@router.get("/preview/{doc_id}")
-async def preview(doc_id: str, user_id: str):
-    if user_id in SESSIONS:
-        for f in SESSIONS[user_id]:
-            if f['id'] == doc_id: return f['data_preview']
-    # Fallback Cloud
-    doc = db.collection('users').document(user_id).collection('configurations').document(doc_id).get()
-    if not doc.exists: raise HTTPException(404)
-    return json.loads(bucket.blob(doc.to_dict()['storage_path']).download_as_string())
+    zip_buffer.seek(0)
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": "attachment; filename=conversion_batch.zip"}
+    )

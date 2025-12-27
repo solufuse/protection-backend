@@ -3,7 +3,7 @@ import math
 TIME_STEPS = [10, 30, 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]
 
 def calculate_single_transformer(tx) -> dict:
-    # ... (Individual logic unchanged) ...
+    # ... (Logique individuelle inchangée) ...
     sn = tx.sn_kva
     u = tx.u_kv
     ratio = tx.ratio_iencl
@@ -11,10 +11,10 @@ def calculate_single_transformer(tx) -> dict:
 
     if u == 0: 
         return {
-            "error": "Zero Voltage", 
+            "error": "Tension nulle", 
             "transformer_name": tx.name,
             "sn_kva": sn, "u_kv": u, "ratio_iencl": ratio, "tau_ms": tau,
-            "decay_curve_rms": {k: 0 for k in [f"{t}ms" for t in TIME_STEPS]} # Return 0 to avoid breaking the sum
+            "decay_curve_rms": {k: 0 for k in [f"{t}ms" for t in TIME_STEPS]} # Retourne 0 pour ne pas casser la somme
         }
     
     i_nom = sn / (math.sqrt(3) * u)
@@ -44,39 +44,39 @@ def calculate_single_transformer(tx) -> dict:
 def process_inrush_request(transformers_list):
     results = []
     
-    # Initialize sums
-    # Create dictionaries filled with 0 : {"10ms": 0.0, "30ms": 0.0 ...}
+    # Initialisation des sommes
+    # On crée des dictionnaires remplis de 0 : {"10ms": 0.0, "30ms": 0.0 ...}
     keys = [f"{t}ms" for t in TIME_STEPS]
     total_curve = {k: 0.0 for k in keys}
     hv_curve = {k: 0.0 for k in keys}
     hv_list = []
 
     for tx in transformers_list:
-        # 1. Individual calculation
+        # 1. Calcul individuel
         res = calculate_single_transformer(tx)
         results.append(res)
         
-        # If error (e.g., zero voltage), ignore for sum
+        # Si erreur (ex: tension nulle), on ignore pour la somme
         if "error" in res: continue
 
         curve = res["decay_curve_rms"]
-        is_hv = tx.u_kv > 50.0  # HV threshold set to 50 kV
+        is_hv = tx.u_kv > 50.0  # Seuil HV fixé à 50 kV
 
         if is_hv:
             hv_list.append(tx.name)
 
-        # 2. Step-by-step sum
+        # 2. Somme pas à pas
         for k in keys:
             val = curve.get(k, 0)
             
-            # Add to GLOBAL TOTAL
+            # Ajout au TOTAL GLOBAL
             total_curve[k] += val
             
-            # Add to HV TOTAL (if condition met)
+            # Ajout au TOTAL HV (si condition remplie)
             if is_hv:
                 hv_curve[k] += val
 
-    # Final rounding
+    # Arrondi final des sommes pour faire propre
     total_curve = {k: round(v, 2) for k, v in total_curve.items()}
     hv_curve = {k: round(v, 2) for k, v in hv_curve.items()}
 
