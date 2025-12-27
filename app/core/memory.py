@@ -1,7 +1,6 @@
 
-# Global In-Memory Storage
-# SESSIONS: { "user_id": [ files ] }
+# Global In-Memory Storage for instant dev access
 SESSIONS = {}
 
-# CLOUD_SETTINGS: { "user_id": bool } - Default True
+# Cloud Settings: { "user_id": True/False }
 CLOUD_SETTINGS = {}
