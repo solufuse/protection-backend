@@ -11,13 +11,8 @@ import zipfile
 router = APIRouter(prefix="/ingestion", tags=["Ingestion"])
 
 def get_file(token, filename):
-    # FORCE RELOAD FROM DISK IF NEEDED
     files = session_manager.get_files(token)
-    
-    if filename not in files: 
-        # Debug : log ce qu'on a
-        print(f"File {filename} not found in session. Available: {list(files.keys())}")
-        raise HTTPException(404, f"File '{filename}' not found in session.")
+    if filename not in files: raise HTTPException(404, "Fichier introuvable")
     return filename, files[filename]
 
 def is_db(name): return name.lower().endswith(('.si2s', '.mdb', '.lf1s'))
@@ -25,9 +20,9 @@ def is_db(name): return name.lower().endswith(('.si2s', '.mdb', '.lf1s'))
 @router.get("/preview")
 def preview_data(filename: str = Query(...), token: str = Depends(get_current_token)):
     name, content = get_file(token, filename)
-    if not is_db(name): raise HTTPException(400, "Format not supported")
+    if not is_db(name): raise HTTPException(400, "Format non supporté")
     dfs = db_converter.extract_data_from_db(content)
-    if not dfs: raise HTTPException(500, "Read error")
+    if not dfs: raise HTTPException(500, "Lecture impossible")
     preview = {"filename": name, "tables": {}}
     for t, df in dfs.items():
         preview["tables"][t] = df.head(10).where(pd.notnull(df), None).to_dict(orient="records")
@@ -37,7 +32,7 @@ def preview_data(filename: str = Query(...), token: str = Depends(get_current_to
 def download_single(format: str, filename: str = Query(...), token: str = Depends(get_current_token)):
     name, content = get_file(token, filename)
     dfs = db_converter.extract_data_from_db(content)
-    if not dfs: raise HTTPException(400, "File unreadable")
+    if not dfs: raise HTTPException(400, "Fichier illisible")
     
     clean_name = name
     for ext in ['.si2s', '.lf1s', '.mdb']: clean_name = clean_name.lower().replace(ext, "")
@@ -48,11 +43,12 @@ def download_single(format: str, filename: str = Query(...), token: str = Depend
     elif format == "json":
         data = {t: df.where(pd.notnull(df), None).to_dict(orient="records") for t, df in dfs.items()}
         return JSONResponse({"filename": name, "data": data})
-    raise HTTPException(400, "Invalid format")
+    raise HTTPException(400, "Format invalide")
 
 @router.get("/download-all/{format}")
 def download_all_zip(format: str, token: str = Depends(get_current_token)):
     files = session_manager.get_files(token)
+    if not files: raise HTTPException(400, "Session vide")
     zip_buffer = io.BytesIO()
     count = 0
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
@@ -68,6 +64,6 @@ def download_all_zip(format: str, token: str = Depends(get_current_token)):
                         d = {t: df.where(pd.notnull(df), None).to_dict(orient="records") for t, df in dfs.items()}
                         z.writestr(f"{base}.json", json.dumps(d, default=str))
                     count += 1
-    if count == 0: raise HTTPException(400, "No convertible files")
+    if count == 0: raise HTTPException(400, "Aucun fichier convertible")
     zip_buffer.seek(0)
     return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=batch.zip"})

@@ -14,6 +14,7 @@ async def upload_files(files: List[UploadFile] = File(...), token: str = Depends
     count = 0
     for file in files:
         content = await file.read()
+        # Gestion des zips
         if file.filename.endswith(".zip"):
             try:
                 with zipfile.ZipFile(io.BytesIO(content)) as z:
@@ -27,43 +28,53 @@ async def upload_files(files: List[UploadFile] = File(...), token: str = Depends
         else:
             session_manager.add_file(token, file.filename, content)
             count += 1
-    return {"message": f"{count} files saved."}
+    return {"message": f"{count} fichiers sauvegardés."}
 
 @router.get("/details")
 def get_details(token: str = Depends(get_current_token)):
-    # Force reload to ensure details match disk
+    # Force la lecture du disque pour être sûr d'avoir les fichiers
     session_manager.get_files(token)
     
     user_storage_dir = os.path.join("/app/storage", token)
     files_info = []
+    
     if os.path.exists(user_storage_dir):
         for root, dirs, files in os.walk(user_storage_dir):
             for name in files:
                 if name.startswith('.'): continue
                 full_path = os.path.join(root, name)
-                # Use flat filename to match session_manager keys
-                size = os.path.getsize(full_path)
+                # On renvoie le chemin relatif pour l'affichage
+                rel_path = os.path.relpath(full_path, user_storage_dir).replace("\\", "/")
                 files_info.append({
-                    "path": name, 
+                    "path": rel_path,
                     "filename": name,
-                    "size": size, 
+                    "size": os.path.getsize(full_path),
                     "content_type": "application/octet-stream"
                 })
     return {"active": True, "files": files_info}
 
 @router.get("/download")
 def download_raw_file(filename: str = Query(...), token: str = Depends(get_current_token)):
-    # AJOUT DE LA FONCTION MANQUANTE
-    safe_filename = os.path.basename(filename)
-    file_path = os.path.join("/app/storage", token, safe_filename)
+    """
+    Télécharge un fichier depuis /app/storage/{uid}/{filename}
+    """
+    # On construit le chemin absolu vers le fichier
+    # Note: On utilise filename directement s'il ne contient pas de ".."
+    if ".." in filename:
+        raise HTTPException(status_code=400, detail="Chemin invalide.")
+        
+    file_path = os.path.join("/app/storage", token, filename)
+    
+    # Debug log (visible dans les logs serveur si besoin)
+    print(f"Tentative de téléchargement : {file_path}")
     
     if not os.path.exists(file_path):
-         # Tentative de rechargement/vérification
+         # Dernière chance : on recharge le session_manager
          session_manager.get_files(token)
          if not os.path.exists(file_path):
-             raise HTTPException(status_code=404, detail=f"File '{safe_filename}' not found on disk.")
+             raise HTTPException(status_code=404, detail=f"Fichier introuvable sur le disque.")
              
-    return FileResponse(file_path, filename=safe_filename)
+    return FileResponse(file_path, filename=os.path.basename(filename))
 
 @router.delete("/file/{path:path}")
 def delete_file(path: str, token: str = Depends(get_current_token)):
