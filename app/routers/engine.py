@@ -1,141 +1,36 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import StreamingResponse, JSONResponse
-from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
-from app.calculations import si2s_converter, topology_manager
+from app.calculations import db_converter, topology_manager
 import json
 import pandas as pd
-import io
 
-router = APIRouter(prefix="/engine-pc", tags=["Protection Coordination (PC)"])
+router = APIRouter(prefix="/engine-pc", tags=["PC"])
 
-# --- HELPERS ---
-def is_supported(fname: str) -> bool:
-    e = fname.lower()
-    return e.endswith('.si2s') or e.endswith('.mdb') or e.endswith('.lf1s')
-
-def get_merged_dataframes_for_calc(token: str):
+def get_merged_dfs(token):
     files = session_manager.get_files(token)
-    if not files: return {}
-    merged_dfs = {}
-    for name, content in files.items():
-        if is_supported(name):
-            dfs = si2s_converter.extract_data_from_si2s(content)
+    merged = {}
+    for n, c in files.items():
+        if n.lower().endswith(('.si2s', '.mdb', '.lf1s')):
+            dfs = db_converter.extract_data_from_db(c)
             if dfs:
                 for t, df in dfs.items():
-                    if t not in merged_dfs: merged_dfs[t] = []
-                    merged_dfs[t].append(df)
+                    if t not in merged: merged[t] = []
+                    merged[t].append(df)
     final = {}
-    for k, v in merged_dfs.items():
+    for k, v in merged.items():
         try: final[k] = pd.concat(v, ignore_index=True)
         except: final[k] = v[0]
     return final
 
-def _execute_calculation_logic(config: ProjectConfig, token: str):
-    # On a TOUJOURS besoin des fichiers réseaux (.si2s) de la session
-    dfs_dict = get_merged_dataframes_for_calc(token)
-    
-    # topology_manager gère si dfs_dict est vide (mode simulation pure config)
-    config_updated = topology_manager.resolve_all(config, dfs_dict)
-    
-    return {
-        "status": "success",
-        "engine": "Protection Coordination (PC)",
-        "project": config_updated.project_name,
-        "plans": config_updated.plans
-    }
-
-def get_config_from_session(token: str) -> ProjectConfig:
-    files = session_manager.get_files(token)
-    if not files: raise HTTPException(status_code=400, detail="Session vide.")
-    
-    target_content = None
-    if "config.json" in files:
-        target_content = files["config.json"]
-    else:
-        for name, content in files.items():
-            if name.lower().endswith(".json"):
-                target_content = content
-                break
-    
-    if target_content is None:
-        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé en session.")
-
-    try:
-        if isinstance(target_content, bytes):
-            text_content = target_content.decode('utf-8')
-        else:
-            text_content = target_content  
-        data = json.loads(text_content)
-        return ProjectConfig(**data)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Config JSON Session invalide : {e}")
-
-# --- 1. VIA SESSION DATA ---
 @router.post("/run")
-async def run_via_session(token: str = Depends(get_current_token)):
-    """
-    Utilise le 'config.json' et les fichiers réseaux (.si2s) en Session RAM.
-    """
-    config = get_config_from_session(token)
-    return _execute_calculation_logic(config, token)
-
-# --- 2. VIA JSON BODY ---
-@router.post("/run-json")
-async def run_via_json(config: ProjectConfig, token: str = Depends(get_current_token)):
-    """
-    Utilise la config envoyée dans le Body + les fichiers réseaux (.si2s) en Session.
-    """
-    return _execute_calculation_logic(config, token)
-
-# --- 3. VIA FILE UPLOAD ---
-@router.post("/run-config")
-async def run_via_file_upload(
-    file: UploadFile = File(...), 
-    token: str = Depends(get_current_token)
-):
-    """
-    Utilise le fichier config uploadé ici + les fichiers réseaux (.si2s) en Session.
-    """
-    content = await file.read()
-    try: 
-        text_content = content.decode('utf-8')
-        valid_config = ProjectConfig(**json.loads(text_content))
-    except Exception as e: 
-        raise HTTPException(status_code=422, detail=f"Fichier config invalide: {e}")
-        
-    return _execute_calculation_logic(valid_config, token)
-
-# --- Data Explorer (Minimal pour éviter de casser le fichier) ---
-def _collect_explorer_data(token, table_search, filename_filter):
+async def run_session(token: str = Depends(get_current_token)):
     files = session_manager.get_files(token)
-    if not files: return {}
-    results = {}
-    for fname, content in files.items():
-        if filename_filter and filename_filter.lower() not in fname.lower(): continue
-        if not is_supported(fname): continue
-        dfs = si2s_converter.extract_data_from_si2s(content)
-        if dfs:
-            file_results = {}
-            for table_name, df in dfs.items():
-                if table_search and table_search.upper() not in table_name.upper(): continue
-                file_results[table_name] = df
-            if file_results: results[fname] = file_results
-    return results
-
-@router.get("/data-explorer")
-def explore_si2s_data(
-    table_search: Optional[str] = Query(None),
-    filename: Optional[str] = Query(None),
-    token: str = Depends(get_current_token)
-):
-    raw_data = _collect_explorer_data(token, table_search, filename)
-    if not raw_data: raise HTTPException(status_code=404, detail="No data found.")
-    preview_data = {}
-    for fname, tables in raw_data.items():
-        preview_data[fname] = {}
-        for t_name, df in tables.items():
-            preview_data[fname][t_name] = {"rows": len(df), "columns": list(df.columns)}
-    return {"data": preview_data}
+    if "config.json" not in files: raise HTTPException(404, "config.json manquant")
+    try: config = ProjectConfig(**json.loads(files["config.json"].decode()))
+    except: raise HTTPException(422, "Config invalide")
+    
+    dfs = get_merged_dfs(token)
+    updated = topology_manager.resolve_all(config, dfs)
+    return {"status": "success", "plans": updated.plans}
