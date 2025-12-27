@@ -4,13 +4,12 @@ from typing import Optional
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
-# CORRECTION : Utilisation de db_converter
 from app.calculations import db_converter, topology_manager
 import json
 import pandas as pd
 import io
 
-router = APIRouter(prefix="/engine-pc", tags=["Protection Coordination (PC)"])
+router = APIRouter(prefix="/protection", tags=["Protection Coordination"])
 
 # --- HELPERS ---
 def is_supported(fname: str) -> bool:
@@ -23,7 +22,6 @@ def get_merged_dataframes_for_calc(token: str):
     merged_dfs = {}
     for name, content in files.items():
         if is_supported(name):
-            # CORRECTION : Appel de db_converter
             dfs = db_converter.extract_data_from_db(content)
             if dfs:
                 for t, df in dfs.items():
@@ -41,7 +39,7 @@ def _execute_calculation_logic(config: ProjectConfig, token: str):
     
     return {
         "status": "success",
-        "engine": "Protection Coordination (PC)",
+        "engine": "Protection Coordination",
         "project": config_updated.project_name,
         "plans": config_updated.plans
     }
@@ -60,7 +58,7 @@ def get_config_from_session(token: str) -> ProjectConfig:
                 break
     
     if target_content is None:
-        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé en session.")
+        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé.")
 
     try:
         if isinstance(target_content, bytes):
@@ -70,7 +68,7 @@ def get_config_from_session(token: str) -> ProjectConfig:
         data = json.loads(text_content)
         return ProjectConfig(**data)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Config JSON Session invalide : {e}")
+        raise HTTPException(status_code=422, detail=f"Config invalide : {e}")
 
 # --- ROUTES ---
 
@@ -94,35 +92,26 @@ async def run_via_file_upload(file: UploadFile = File(...), token: str = Depends
         
     return _execute_calculation_logic(valid_config, token)
 
-# --- DATA EXPLORER ---
-def _collect_explorer_data(token, table_search, filename_filter):
+@router.get("/data-explorer")
+def explore_data(
+    table_search: Optional[str] = Query(None),
+    filename: Optional[str] = Query(None),
+    token: str = Depends(get_current_token)
+):
     files = session_manager.get_files(token)
-    if not files: return {}
+    if not files: return {"data": {}}
+    
     results = {}
     for fname, content in files.items():
-        if filename_filter and filename_filter.lower() not in fname.lower(): continue
+        if filename and filename.lower() not in fname.lower(): continue
         if not is_supported(fname): continue
-        # CORRECTION : Appel de db_converter
+        
         dfs = db_converter.extract_data_from_db(content)
         if dfs:
             file_results = {}
             for table_name, df in dfs.items():
                 if table_search and table_search.upper() not in table_name.upper(): continue
-                file_results[table_name] = df
+                file_results[table_name] = {"rows": len(df), "columns": list(df.columns)}
             if file_results: results[fname] = file_results
-    return results
-
-@router.get("/data-explorer")
-def explore_si2s_data(
-    table_search: Optional[str] = Query(None),
-    filename: Optional[str] = Query(None),
-    token: str = Depends(get_current_token)
-):
-    raw_data = _collect_explorer_data(token, table_search, filename)
-    if not raw_data: raise HTTPException(status_code=404, detail="No data found.")
-    preview_data = {}
-    for fname, tables in raw_data.items():
-        preview_data[fname] = {}
-        for t_name, df in tables.items():
-            preview_data[fname][t_name] = {"rows": len(df), "columns": list(df.columns)}
-    return {"data": preview_data}
+            
+    return {"data": results}
