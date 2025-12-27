@@ -28,28 +28,37 @@ class IngestionRequest(BaseModel):
 
 ALLOWED_EXTENSIONS = {'.json', '.si2s', '.mdb', '.sqlite', '.lf1s', '.xml'}
 
-# --- HELPERS ---
+# --- HELPER EXCEL GENERATOR ---
 def json_to_excel_bytes(json_content):
-    """Reconstruit l'Excel multi-onglets"""
+    """Reconstructs Multi-sheet Excel from JSON Data"""
     output = io.BytesIO()
+    
+    # Check if we have the extracted DB structure
     if "raw_content" in json_content and "tables_data" in json_content["raw_content"]:
         tables = json_content["raw_content"]["tables_data"]
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            if not tables: pd.DataFrame().to_excel(writer, sheet_name="Empty")
+            if not tables:
+                pd.DataFrame().to_excel(writer, sheet_name="Empty")
             else:
                 for table_name, rows in tables.items():
                     try:
                         df = pd.DataFrame(rows)
+                        # Excel Sheet Name Logic (Max 31 chars, no dupes)
                         sheet_name = table_name[:31]
-                        base_name = sheet_name; count = 1
+                        base_name = sheet_name
+                        count = 1
                         while sheet_name in writer.book.sheetnames:
-                            sheet_name = f"{base_name[:28]}_{count}"; count += 1
+                            sheet_name = f"{base_name[:28]}_{count}"
+                            count += 1
                         df.to_excel(writer, sheet_name=sheet_name, index=False)
-                    except: pass
+                    except Exception as e:
+                        print(f"Error writing sheet {table_name}: {e}")
     else:
+        # Fallback for flat JSON
         df = pd.json_normalize(json_content)
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False, sheet_name='Data')
+            
     output.seek(0)
     return output
 
@@ -57,24 +66,23 @@ def process_single_file(user_id, file_path, original_filename):
     try:
         print(f"   ⚙️ Processing: {original_filename}")
         
-        # 1. SAUVEGARDE DU FICHIER BRUT (BACKUP)
+        # 1. SAVE RAW FILE (Backup)
         raw_uuid = str(uuid.uuid4())
         _, ext = os.path.splitext(original_filename)
         raw_storage_path = f"raw_uploads/{user_id}/{raw_uuid}{ext}"
-        
         blob_raw = bucket.blob(raw_storage_path)
-        blob_raw.upload_from_filename(file_path) # Upload direct du fichier physique
-        print(f"   💾 Raw backup saved: {raw_storage_path}")
+        blob_raw.upload_from_filename(file_path)
 
-        # 2. CONVERSION ET SAUVEGARDE JSON
+        # 2. CONVERT TO JSON (Using DBConverter)
         result_data = DBConverter.convert_to_json(file_path, original_filename)
+        
+        # 3. SAVE PROCESSED JSON
         result_uuid = str(uuid.uuid4())
         processed_storage_path = f"processed/{user_id}/{result_uuid}.json"
-        
         blob_proc = bucket.blob(processed_storage_path)
         blob_proc.upload_from_string(json.dumps(result_data, default=str), content_type='application/json')
 
-        # 3. ENREGISTREMENT FIRESTORE
+        # 4. UPDATE FIRESTORE
         doc_ref = db.collection('users').document(user_id).collection('configurations').document()
         doc_ref.set({
             'created_at': datetime.utcnow(),
@@ -82,11 +90,11 @@ def process_single_file(user_id, file_path, original_filename):
             'original_name': original_filename,
             'processed': True,
             'is_large_file': True,
-            'storage_path': processed_storage_path,     # Lien vers le JSON
-            'raw_file_path': raw_storage_path,          # Lien vers l'Original
+            'storage_path': processed_storage_path,
+            'raw_file_path': raw_storage_path,
             'preview_available': True
         })
-        print(f"   ✅ Firestore updated: {original_filename}")
+        print(f"   ✅ Success: {original_filename}")
 
     except Exception as e:
         print(f"   ❌ Error processing: {e}")
@@ -135,20 +143,11 @@ async def download_single(doc_id: str, format: str, user_id: str):
     if not doc.exists: raise HTTPException(404, "File not found")
     meta = doc.to_dict()
     
-    # 1. TÉLÉCHARGEMENT ORIGINAL (RAW)
     if format == 'raw':
-        if not meta.get('raw_file_path'):
-            raise HTTPException(404, "Original file not found (old upload?)")
+        if not meta.get('raw_file_path'): raise HTTPException(404, "Original file missing")
         blob = bucket.blob(meta['raw_file_path'])
-        file_stream = io.BytesIO(blob.download_as_string())
-        original_ext = os.path.splitext(meta['original_name'])[1]
-        return StreamingResponse(
-            file_stream, 
-            media_type="application/octet-stream", 
-            headers={"Content-Disposition": f"attachment; filename={meta['original_name']}"}
-        )
+        return StreamingResponse(io.BytesIO(blob.download_as_string()), media_type="application/octet-stream", headers={"Content-Disposition": f"attachment; filename={meta['original_name']}"})
 
-    # 2. TÉLÉCHARGEMENT CONVERTI (JSON/XLSX)
     blob = bucket.blob(meta['storage_path'])
     json_content = json.loads(blob.download_as_string())
     filename = os.path.splitext(meta['original_name'])[0]
@@ -161,29 +160,25 @@ async def download_single(doc_id: str, format: str, user_id: str):
 
 @router.get("/download-all/{format}")
 async def download_all(format: str, user_id: str):
+    # (Code simplifié pour le download-all, identique aux versions précédentes)
     docs = db.collection('users').document(user_id).collection('configurations').stream()
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
         for doc in docs:
             meta = doc.to_dict()
             try:
-                # Logic for ZIP raw files
                 if format == 'raw' and meta.get('raw_file_path'):
                      blob = bucket.blob(meta['raw_file_path'])
                      zip_file.writestr(meta['original_name'], blob.download_as_string())
-                
-                # Logic for processed files
                 elif meta.get('storage_path'):
                     blob = bucket.blob(meta['storage_path'])
                     content = json.loads(blob.download_as_string())
                     clean_name = os.path.splitext(meta.get('original_name', doc.id))[0]
-                    if format == 'json': 
-                        zip_file.writestr(f"{clean_name}.json", json.dumps(content, indent=2, default=str))
+                    if format == 'json': zip_file.writestr(f"{clean_name}.json", json.dumps(content, indent=2, default=str))
                     elif format == 'xlsx':
                         excel_bytes = json_to_excel_bytes(content)
                         zip_file.writestr(f"{clean_name}.xlsx", excel_bytes.getvalue())
-            except Exception as e: print(f"Zip Error {doc.id}: {e}")
-            
+            except: pass
     zip_buffer.seek(0)
     timestamp = datetime.now().strftime("%Y%m%d")
     return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=solufuse_export_{timestamp}_{format}.zip"})
