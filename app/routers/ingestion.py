@@ -1,9 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, Response
 from app.services import session_manager
 from app.calculations import db_converter
 from app.services.session_manager import get_absolute_file_path
-from app.core.auth_utils import get_uid_from_token # IMPORT DU FIX
+from app.core.auth_utils import get_uid_from_token
 import pandas as pd
 import io
 import json
@@ -13,15 +13,11 @@ import os
 router = APIRouter(prefix="/ingestion", tags=["Ingestion"])
 
 def get_file_content_via_token_raw(token_raw: str, filename: str):
-    # CORRECTION : Extraction UID
     user_id = get_uid_from_token(token_raw)
-    
-    # Force reload si nécessaire
-    session_manager.get_files(user_id)
-    
+    session_manager.get_files(user_id) # Reload check
     file_path = get_absolute_file_path(user_id, filename)
     if not os.path.exists(file_path):
-        raise HTTPException(404, f"File not found in storage for user {user_id}")
+        raise HTTPException(404, f"File not found")
     with open(file_path, "rb") as f:
         return filename, f.read()
 
@@ -31,19 +27,25 @@ def is_db(name): return name.lower().endswith(('.si2s', '.mdb', '.lf1s', '.json'
 def preview_data(filename: str = Query(...), token: str = Query(...)):
     name, content = get_file_content_via_token_raw(token, filename)
     
-    if name.lower().endswith('.json'):
-        try: return JSONResponse(json.loads(content))
-        except: raise HTTPException(400, "Invalid JSON")
+    data_to_return = {}
 
-    if not is_db(name): raise HTTPException(400, "Format not supported")
+    if name.lower().endswith('.json'):
+        try: data_to_return = json.loads(content)
+        except: raise HTTPException(400, "Invalid JSON")
     
-    dfs = db_converter.extract_data_from_db(content)
-    if not dfs: raise HTTPException(500, "Read error")
-    
-    preview = {"filename": name, "tables": {}}
-    for t, df in dfs.items():
-        preview["tables"][t] = df.head(10).where(pd.notnull(df), None).to_dict(orient="records")
-    return preview
+    elif is_db(name):
+        dfs = db_converter.extract_data_from_db(content)
+        if not dfs: raise HTTPException(500, "Read error")
+        data_to_return = {"filename": name, "tables": {}}
+        for t, df in dfs.items():
+            # Conversion propre
+            data_to_return["tables"][t] = df.head(50).where(pd.notnull(df), None).to_dict(orient="records")
+    else:
+        raise HTTPException(400, "Format not supported")
+
+    # PRETTY PRINT : On renvoie une string formatée au lieu du JSON minifié par défaut
+    json_str = json.dumps(data_to_return, indent=2, default=str)
+    return Response(content=json_str, media_type="application/json")
 
 @router.get("/download/{format}")
 def download_single(format: str, filename: str = Query(...), token: str = Query(...)):
@@ -59,7 +61,9 @@ def download_single(format: str, filename: str = Query(...), token: str = Query(
         return StreamingResponse(stream, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename={clean_name}.xlsx"})
     elif format == "json":
         data = {t: df.where(pd.notnull(df), None).to_dict(orient="records") for t, df in dfs.items()}
-        return JSONResponse({"filename": name, "data": data})
+        # Pretty print pour le fichier téléchargé aussi
+        json_str = json.dumps({"filename": name, "data": data}, indent=2, default=str)
+        return Response(content=json_str, media_type="application/json", headers={"Content-Disposition": f"attachment; filename={clean_name}.json"})
     raise HTTPException(400, "Invalid format")
 
 @router.get("/download-all/{format}")
@@ -81,7 +85,7 @@ def download_all_zip(format: str, token: str = Query(...)):
                         z.writestr(f"{base}.xlsx", db_converter.generate_excel_bytes(dfs).getvalue())
                     elif format == "json":
                         d = {t: df.where(pd.notnull(df), None).to_dict(orient="records") for t, df in dfs.items()}
-                        z.writestr(f"{base}.json", json.dumps(d, default=str))
+                        z.writestr(f"{base}.json", json.dumps(d, default=str, indent=2))
                     count += 1
     if count == 0: raise HTTPException(400, "No convertible files")
     zip_buffer.seek(0)
