@@ -3,16 +3,19 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.calculations import loadflow_calculator
-from app.schemas.loadflow_schema import LoadflowSettings, LoadflowResponse
+from app.schemas.loadflow_schema import LoadflowSettings
 import json
 import pandas as pd
 import io
 import zipfile
 
+# Define the router
 router = APIRouter(prefix="/loadflow", tags=["Loadflow Analysis"])
 
 def get_lf_config_from_session(token: str) -> LoadflowSettings:
-    """Helper: Retrieves and parses 'config.json' from user session."""
+    """
+    Helper: Retrieves and parses 'config.json' from user session.
+    """
     files = session_manager.get_files(token)
     if not files: raise HTTPException(status_code=400, detail="Session empty.")
     
@@ -32,8 +35,11 @@ def get_lf_config_from_session(token: str) -> LoadflowSettings:
         return LoadflowSettings(**data["loadflow_settings"])
     except Exception as e: raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
-def generate_flat_excel(data: dict, filename: str):
-    """Generates a flattened Excel file (one row per transformer)."""
+def _generate_excel_bytes(data: dict) -> bytes:
+    """
+    Internal helper: Transforms the analysis data into an Excel file (bytes).
+    This logic was extracted from generate_flat_excel to allow saving to disk without streaming.
+    """
     results = data.get("results", [])
     flat_rows = []
 
@@ -78,11 +84,26 @@ def generate_flat_excel(data: dict, filename: str):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_final.to_excel(writer, sheet_name="Results", index=False)
+        # Apply simple column width formatting
         for col in writer.sheets["Results"].columns:
             try: writer.sheets["Results"].column_dimensions[col[0].column_letter].width = 18
             except: pass
-    output.seek(0)
-    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename={filename}"})
+            
+    return output.getvalue()
+
+def generate_flat_excel(data: dict, filename: str):
+    """
+    Generates a StreamingResponse for downloading the Excel file.
+    Uses the helper _generate_excel_bytes.
+    """
+    excel_content = _generate_excel_bytes(data)
+    return StreamingResponse(
+        io.BytesIO(excel_content), 
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+# --- ENDPOINTS ---
 
 @router.post("/run")
 async def run_loadflow_session(
@@ -90,8 +111,7 @@ async def run_loadflow_session(
     token: str = Depends(get_current_token)
 ):
     """
-    Run Loadflow Analysis on ALL files (Winners + Losers).
-    Supports JSON (default) or XLSX export via 'format' parameter.
+    Run Loadflow Analysis on ALL files. Returns JSON or downloads XLSX.
     """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
@@ -108,8 +128,7 @@ async def run_loadflow_winners_only(
     token: str = Depends(get_current_token)
 ):
     """
-    Run Loadflow Analysis and return ONLY the winning files (Best of each Scenario).
-    Supports JSON (default) or XLSX export via 'format' parameter.
+    Run Loadflow Analysis returning ONLY winning files.
     """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
@@ -162,3 +181,36 @@ async def export_winners_l1fs(token: str = Depends(get_current_token)):
                 zip_file.writestr(fname, content)
     zip_buffer.seek(0)
     return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=loadflow_winners_source.zip"})
+
+@router.post("/run-and-save")
+async def run_and_save_loadflow(
+    basename: str = Query("loadflow_results", description="Base name for the output files (without extension)"),
+    token: str = Depends(get_current_token)
+):
+    """
+    Runs the Loadflow Analysis (on all files) and saves BOTH JSON and XLSX results
+    directly into the user's storage folder (/app/storage/{uid}/).
+    """
+    # 1. Retrieve configuration and files from session
+    config = get_lf_config_from_session(token)
+    files = session_manager.get_files(token)
+    
+    # 2. Run the calculation logic
+    data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
+    
+    # 3. Save JSON File
+    json_filename = f"{basename}.json"
+    json_bytes = json.dumps(data, indent=2, default=str).encode('utf-8')
+    session_manager.add_file(token, json_filename, json_bytes)
+    
+    # 4. Save XLSX File
+    xlsx_filename = f"{basename}.xlsx"
+    xlsx_bytes = _generate_excel_bytes(data)
+    session_manager.add_file(token, xlsx_filename, xlsx_bytes)
+    
+    return {
+        "status": "success",
+        "message": f"Calculation complete. Saved files to user storage.",
+        "files_saved": [json_filename, xlsx_filename],
+        "data_summary": f"{len(data.get('results', []))} files analyzed."
+    }
