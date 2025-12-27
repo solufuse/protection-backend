@@ -84,26 +84,44 @@ def generate_flat_excel(data: dict, filename: str):
     output.seek(0)
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename={filename}"})
 
-@router.post("/run", response_model=LoadflowResponse)
-async def run_loadflow_session(token: str = Depends(get_current_token)):
+@router.post("/run")
+async def run_loadflow_session(
+    format: str = Query("json", pattern="^(xlsx|json)$"), 
+    token: str = Depends(get_current_token)
+):
     """
     Run Loadflow Analysis on ALL files (Winners + Losers).
+    Supports JSON (default) or XLSX export via 'format' parameter.
     """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
-    return loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
+    data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
+    
+    if format == "xlsx":
+        return generate_flat_excel(data, "loadflow_export_all.xlsx")
+    
+    return data
 
-@router.post("/run-win", response_model=LoadflowResponse)
-async def run_loadflow_winners_only(token: str = Depends(get_current_token)):
+@router.post("/run-win")
+async def run_loadflow_winners_only(
+    format: str = Query("json", pattern="^(xlsx|json)$"), 
+    token: str = Depends(get_current_token)
+):
     """
     Run Loadflow Analysis and return ONLY the winning files (Best of each Scenario).
+    Supports JSON (default) or XLSX export via 'format' parameter.
     """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
-    return loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
+    data = loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
+    
+    if format == "xlsx":
+        return generate_flat_excel(data, "loadflow_export_winners.xlsx")
+        
+    return data
 
 @router.get("/export")
-async def export_all_files(format: str = Query("xlsx", regex="^(xlsx|json)$"), token: str = Depends(get_current_token)):
+async def export_all_files(format: str = Query("xlsx", pattern="^(xlsx|json)$"), token: str = Depends(get_current_token)):
     """
     Download global report (All Files).
     """
@@ -114,7 +132,7 @@ async def export_all_files(format: str = Query("xlsx", regex="^(xlsx|json)$"), t
     return generate_flat_excel(data, "loadflow_export_all.xlsx")
 
 @router.get("/export-win")
-async def export_winners_flat(format: str = Query("xlsx", regex="^(xlsx|json)$"), token: str = Depends(get_current_token)):
+async def export_winners_flat(format: str = Query("xlsx", pattern="^(xlsx|json)$"), token: str = Depends(get_current_token)):
     """
     Download report for WINNERS ONLY.
     """
