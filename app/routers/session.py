@@ -1,5 +1,8 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, BackgroundTasks
 from app.core.security import get_current_token
+from app.core.memory import SESSIONS, CLOUD_SETTINGS
+from app.core.db_converter import DBConverter
+from app.firebase_config import db, bucket
 from typing import List
 import zipfile
 import io
@@ -9,105 +12,86 @@ import tempfile
 import json
 from datetime import datetime
 
-try:
-    from app.core.memory import SESSIONS
-    from app.core.db_converter import DBConverter
-except ImportError:
-    from core.memory import SESSIONS
-    from core.db_converter import DBConverter
+router = APIRouter(prefix="/session", tags=["Session Sync"])
 
-router = APIRouter(prefix="/session", tags=["Session Manager"])
-
-ALLOWED_EXTENSIONS = {'.json', '.si2s', '.lf1s', '.sqlite', '.db'}
-
-def process_and_store(user_id: str, filename: str, content: bytes):
-    """Analyse le type de fichier et l'injecte en RAM"""
+def sync_file_to_ram_and_cloud(user_id: str, filename: str, content: bytes, bt: BackgroundTasks):
+    """
+    Injection RAM immédiate + Programmation Sync Cloud
+    """
     ext = os.path.splitext(filename)[1].lower()
-    
-    # On crée un fichier temporaire pour que DBConverter puisse le lire
     with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
         tmp.write(content)
         tmp_path = tmp.name
-    
-    try:
-        data_preview = {}
-        
-        # 1. Traitement selon l'extension
-        if ext == '.json':
-            try:
-                data_preview = json.loads(content.decode('utf-8'))
-            except:
-                data_preview = {"error": "Invalid JSON content"}
-        
-        elif ext in ['.si2s', '.lf1s', '.sqlite', '.db']:
-            # Utilise le moteur SQLite que nous avons construit
-            data_preview = DBConverter.convert_to_json(tmp_path, filename)
-        
-        else:
-            data_preview = {"message": "Fichier binaire stocké sans conversion"}
 
-        # 2. Structure pour la RAM
-        if user_id not in SESSIONS:
-            SESSIONS[user_id] = []
-            
+    try:
+        # 1. Conversion RAM (Instantané)
+        result_data = DBConverter.convert_to_json(tmp_path, filename)
+        f_id = str(uuid.uuid4())
+        
         file_meta = {
-            "id": str(uuid.uuid4()),
+            "id": f_id,
             "original_name": filename,
             "created_at": datetime.utcnow().isoformat(),
             "source_type": ext.replace('.', ''),
             "cloud_synced": False,
-            "data_preview": data_preview
+            "data_preview": result_data,
+            "storage_path": f"processed/{user_id}/{f_id}.json",
+            "raw_file_path": f"raw_uploads/{user_id}/{f_id}{ext}"
         }
-        
-        SESSIONS[user_id].insert(0, file_meta)
-        return file_meta
 
+        if user_id not in SESSIONS:
+            SESSIONS[user_id] = []
+        SESSIONS[user_id].insert(0, file_meta)
+
+        # 2. Backup Cloud (5s delay) - On crée une tâche de fond
+        if CLOUD_SETTINGS.get(user_id, True):
+            # On passe par l'ingestion asynchrone pour ne pas bloquer
+            from app.routers.ingestion import background_cloud_sync
+            
+            # Copie buffer pour le délai
+            buffer_dir = "/tmp/session_buffer"
+            if not os.path.exists(buffer_dir): os.makedirs(buffer_dir)
+            b_path = os.path.join(buffer_dir, f"sync_{f_id}{ext}")
+            shutil.copy(tmp_path, b_path)
+            
+            bt.add_task(background_cloud_sync, user_id, b_path, result_data, file_meta)
+            
+        return file_meta
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
+        if os.path.exists(tmp_path): os.remove(tmp_path)
 
 @router.post("/upload")
 async def upload_to_session(
+    bt: BackgroundTasks,
     files: List[UploadFile] = File(...), 
     token: str = Depends(get_current_token)
 ):
-    """Supporte ZIP, JSON, SI2S, LF1S"""
-    count = 0
+    """Upload direct vers RAM + Sync Cloud automatique"""
+    added = 0
     for file in files:
         content = await file.read()
-        
-        # Cas du ZIP
         if file.filename.lower().endswith(".zip"):
-            try:
-                with zipfile.ZipFile(io.BytesIO(content)) as z:
-                    for name in z.namelist():
-                        # On filtre les fichiers inutiles et on vérifie l'extension
-                        ext = os.path.splitext(name)[1].lower()
-                        if not name.endswith("/") and "__MACOSX" not in name and ext in ALLOWED_EXTENSIONS:
-                            process_and_store(token, name, z.read(name))
-                            count += 1
-            except Exception as e:
-                print(f"Erreur ZIP: {e}")
-        
-        # Cas des fichiers directs
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                for name in z.namelist():
+                    if not name.endswith("/") and "__MACOSX" not in name:
+                        sync_file_to_ram_and_cloud(token, name, z.read(name), bt)
+                        added += 1
         else:
-            process_and_store(token, file.filename, content)
-            count += 1
-            
-    return {"status": "success", "added": count, "user_id": token}
+            sync_file_to_ram_and_cloud(token, file.filename, content, bt)
+            added += 1
+    return {"status": "synchronized", "count": added}
 
 @router.get("/details")
 async def get_details(token: str = Depends(get_current_token)):
-    return {"files": SESSIONS.get(token, [])}
-
-@router.delete("/file/{file_id}")
-async def delete_file(file_id: str, token: str = Depends(get_current_token)):
-    if token in SESSIONS:
-        SESSIONS[token] = [f for f in SESSIONS[token] if f['id'] != file_id]
-        return {"status": "deleted", "id": file_id}
-    return {"status": "error", "message": "Session empty"}
+    """La vérité est ici : ce qui est en RAM est prioritaire"""
+    return {
+        "user_id": token,
+        "files": SESSIONS.get(token, []),
+        "cloud_enabled": CLOUD_SETTINGS.get(token, True)
+    }
 
 @router.delete("/clear")
-async def clear_all(token: str = Depends(get_current_token)):
+async def clear_session(token: str = Depends(get_current_token)):
     SESSIONS[token] = []
-    return {"status": "success"}
+    # On pourrait aussi vider Firestore ici si on voulait une purge totale
+    return {"status": "cleared"}
