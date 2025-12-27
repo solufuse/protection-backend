@@ -4,7 +4,7 @@ from typing import Optional
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
-# PATCH: Using db_converter instead of si2s_converter to match repo structure
+# Utilisation de db_converter pour éviter l'erreur d'import
 from app.calculations import db_converter, topology_manager
 import json
 import pandas as pd
@@ -23,7 +23,6 @@ def get_merged_dataframes_for_calc(token: str):
     merged_dfs = {}
     for name, content in files.items():
         if is_supported(name):
-            # PATCH: Using db_converter.extract_data_from_db instead of si2s_converter
             dfs = db_converter.extract_data_from_db(content)
             if dfs:
                 for t, df in dfs.items():
@@ -36,10 +35,7 @@ def get_merged_dataframes_for_calc(token: str):
     return final
 
 def _execute_calculation_logic(config: ProjectConfig, token: str):
-    # We ALWAYS need network files (.si2s) from the session
     dfs_dict = get_merged_dataframes_for_calc(token)
-    
-    # topology_manager handles empty dfs_dict (pure config simulation mode)
     config_updated = topology_manager.resolve_all(config, dfs_dict)
     
     return {
@@ -63,7 +59,7 @@ def get_config_from_session(token: str) -> ProjectConfig:
                 break
     
     if target_content is None:
-        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé en session.")
+        raise HTTPException(status_code=404, detail="Aucun 'config.json' trouvé.")
 
     try:
         if isinstance(target_content, bytes):
@@ -73,34 +69,21 @@ def get_config_from_session(token: str) -> ProjectConfig:
         data = json.loads(text_content)
         return ProjectConfig(**data)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Config JSON Session invalide : {e}")
+        raise HTTPException(status_code=422, detail=f"Config invalide : {e}")
 
-# --- 1. VIA SESSION DATA ---
+# --- ROUTES ---
+
 @router.post("/run")
 async def run_via_session(token: str = Depends(get_current_token)):
-    """
-    Utilise le 'config.json' et les fichiers réseaux (.si2s) en Session RAM.
-    """
     config = get_config_from_session(token)
     return _execute_calculation_logic(config, token)
 
-# --- 2. VIA JSON BODY ---
 @router.post("/run-json")
 async def run_via_json(config: ProjectConfig, token: str = Depends(get_current_token)):
-    """
-    Utilise la config envoyée dans le Body + les fichiers réseaux (.si2s) en Session.
-    """
     return _execute_calculation_logic(config, token)
 
-# --- 3. VIA FILE UPLOAD ---
 @router.post("/run-config")
-async def run_via_file_upload(
-    file: UploadFile = File(...), 
-    token: str = Depends(get_current_token)
-):
-    """
-    Utilise le fichier config uploadé ici + les fichiers réseaux (.si2s) en Session.
-    """
+async def run_via_file_upload(file: UploadFile = File(...), token: str = Depends(get_current_token)):
     content = await file.read()
     try: 
         text_content = content.decode('utf-8')
@@ -110,35 +93,26 @@ async def run_via_file_upload(
         
     return _execute_calculation_logic(valid_config, token)
 
-# --- Data Explorer (Minimal pour éviter de casser le fichier) ---
-def _collect_explorer_data(token, table_search, filename_filter):
+@router.get("/data-explorer")
+def explore_data(
+    table_search: Optional[str] = Query(None),
+    filename: Optional[str] = Query(None),
+    token: str = Depends(get_current_token)
+):
     files = session_manager.get_files(token)
-    if not files: return {}
+    if not files: return {"data": {}}
+    
     results = {}
     for fname, content in files.items():
-        if filename_filter and filename_filter.lower() not in fname.lower(): continue
+        if filename and filename.lower() not in fname.lower(): continue
         if not is_supported(fname): continue
-        # PATCH: Using db_converter
+        
         dfs = db_converter.extract_data_from_db(content)
         if dfs:
             file_results = {}
             for table_name, df in dfs.items():
                 if table_search and table_search.upper() not in table_name.upper(): continue
-                file_results[table_name] = df
+                file_results[table_name] = {"rows": len(df), "columns": list(df.columns)}
             if file_results: results[fname] = file_results
-    return results
-
-@router.get("/data-explorer")
-def explore_si2s_data(
-    table_search: Optional[str] = Query(None),
-    filename: Optional[str] = Query(None),
-    token: str = Depends(get_current_token)
-):
-    raw_data = _collect_explorer_data(token, table_search, filename)
-    if not raw_data: raise HTTPException(status_code=404, detail="No data found.")
-    preview_data = {}
-    for fname, tables in raw_data.items():
-        preview_data[fname] = {}
-        for t_name, df in tables.items():
-            preview_data[fname][t_name] = {"rows": len(df), "columns": list(df.columns)}
-    return {"data": preview_data}
+            
+    return {"data": results}
