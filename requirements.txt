@@ -7,3 +7,6 @@ firebase-admin==6.2.0
 pandas
 numpy
 openpyxl
+
+pandas
+openpyxl
