@@ -8,33 +8,35 @@ class DBConverter:
     @staticmethod
     def _parse_sqlite(file_path):
         """
-        Helper function to extract EVERYTHING from a SQLite database.
-        Returns a dictionary where keys are table names and values are rows.
+        Extrait TOUTES les tables comme dans tes scripts locaux.
+        Renvoie un dictionnaire { "NomTable": [ligne1, ligne2...], ... }
         """
         db_data = {}
         conn = None
         try:
-            conn = sqlite3.connect(file_path)
-            # Enable row factory to get column names
-            conn.row_factory = sqlite3.Row
+            # Mode Read-Only comme dans ton script lf1s
+            conn = sqlite3.connect(f"file:{file_path}?mode=ro", uri=True)
+            conn.row_factory = sqlite3.Row # Pour avoir les noms de colonnes
             cursor = conn.cursor()
             
-            # 1. Get list of all tables
+            # 1. Lister les tables (Ta méthode)
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-            tables = [row['name'] for row in cursor.fetchall()]
+            tables = [row[0] for row in cursor.fetchall()]
             
-            db_data["tables_found"] = tables
+            db_data["tables_list"] = tables
+            db_data["tables_data"] = {}
 
-            # 2. Extract data from each table (Limit to 100 rows per table for safety)
-            for table in tables:
+            # 2. Boucle d'extraction (Ta méthode adaptée pour le Cloud)
+            for t in tables:
                 try:
-                    cursor.execute(f"SELECT * FROM '{table}' LIMIT 100")
-                    rows = cursor.fetchall()
-                    # Convert row objects to dicts
-                    table_data = [dict(row) for row in rows]
-                    db_data[table] = table_data
+                    # On utilise Pandas pour lire proprement, puis on convertit en dict pour le JSON
+                    df = pd.read_sql_query(f'SELECT * FROM "{t}"', conn)
+                    
+                    # Conversion en dictionnaire pour stockage JSON
+                    # orient='records' donne : [{"col1": val, "col2": val}, ...]
+                    db_data["tables_data"][t] = df.to_dict(orient='records')
                 except Exception as e:
-                    db_data[table] = f"Error reading table: {str(e)}"
+                    print(f"⚠️ Error reading table {t}: {e}")
             
             return db_data
 
@@ -45,9 +47,6 @@ class DBConverter:
 
     @staticmethod
     def convert_to_json(file_path, original_filename):
-        """
-        Universal converter with REAL SQLite support.
-        """
         ext = os.path.splitext(original_filename)[1].lower()
         base_name = os.path.splitext(original_filename)[0]
         
@@ -61,29 +60,23 @@ class DBConverter:
         }
 
         try:
-            # --- CAS 1: JSON ---
+            # CAS 1: JSON
             if ext == '.json':
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = json.load(f)
                     if isinstance(content, dict): data.update(content)
             
-            # --- CAS 2: SQLite / LF1S (Si c'est du SQLite) ---
-            # On ajoute .si2s ici au cas où ce soit un SQLite renommé (ça arrive)
+            # CAS 2: SI2S / LF1S / SQLITE (Ta logique)
             elif ext in ['.sqlite', '.db', '.lf1s', '.si2s', '.mdb']:
-                
-                # On tente de le lire comme du SQLite d'abord
                 sqlite_content = DBConverter._parse_sqlite(file_path)
                 
-                # Si on a trouvé des tables, c'est que c'était bien du SQLite !
-                if "tables_found" in sqlite_content and sqlite_content["tables_found"]:
+                if "tables_list" in sqlite_content and sqlite_content["tables_list"]:
                      data["raw_content"] = sqlite_content
-                     data["message"] = "Successfully parsed as SQLite Database."
+                     data["message"] = "Successfully parsed SQLite/ETAP Database."
                 else:
-                     # Sinon, c'est peut-être du MDB binaire ou autre chose
-                     data["message"] = "Could not parse as SQLite. Might be binary MDB or XML."
-                     # (Ici on pourrait garder la simulation si besoin, ou laisser vide)
+                     data["message"] = "Could not parse database structure."
 
-            # --- CAS 3: XML ---
+            # CAS 3: XML
             elif ext == '.xml':
                 data["logs"] = ["XML parsing not implemented yet"]
             
