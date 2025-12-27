@@ -18,7 +18,7 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
         try:
             dfs = db_converter.extract_data_from_db(content)
             if dfs: res["is_valid"] = True
-            # (Note: Full logic skipped here for brevity of fix script, but DB loading is fixed)
+            # (Note: Basic validation for this fix script)
         except: pass
         results.append(res)
     

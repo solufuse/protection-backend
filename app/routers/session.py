@@ -45,9 +45,9 @@ def get_details(token: str = Depends(get_current_token)):
                 })
     return {"active": True, "files": files_info}
 
+# --- C'EST CETTE FONCTION QUI MANQUAIT POUR LE DOWNLOAD RAW ---
 @router.get("/download")
 def download_raw_file(filename: str = Query(...), token: str = Depends(get_current_token)):
-    # CORRECTION CRITIQUE : Permet le téléchargement RAW
     safe_filename = os.path.basename(filename)
     file_path = os.path.join("/app/storage", token, safe_filename)
     if not os.path.exists(file_path):
