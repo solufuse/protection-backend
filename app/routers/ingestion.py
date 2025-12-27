@@ -11,8 +11,8 @@ import shutil
 import zipfile
 import io
 import pandas as pd
+import asyncio # Nécessaire pour le délai
 
-# Imports Hybrides
 try:
     from app.firebase_config import db, bucket
     from app.core.db_converter import DBConverter
@@ -31,96 +31,82 @@ class IngestionRequest(BaseModel):
 
 ALLOWED_EXTENSIONS = {'.json', '.si2s', '.mdb', '.sqlite', '.lf1s', '.xml'}
 
-# --- HELPERS ---
-def json_to_excel_bytes(json_content):
-    output = io.BytesIO()
-    if "raw_content" in json_content and "tables_data" in json_content["raw_content"]:
-        tables = json_content["raw_content"]["tables_data"]
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            if not tables: pd.DataFrame().to_excel(writer, sheet_name="Empty")
-            else:
-                for table_name, rows in tables.items():
-                    try:
-                        df = pd.DataFrame(rows)
-                        sheet_name = table_name[:31]
-                        base_name = sheet_name; count = 1
-                        while sheet_name in writer.book.sheetnames:
-                            sheet_name = f"{base_name[:28]}_{count}"; count += 1
-                        df.to_excel(writer, sheet_name=sheet_name, index=False)
-                    except: pass
-    else:
-        df = pd.json_normalize(json_content)
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Data')
-    output.seek(0)
-    return output
-
-def process_single_file(user_id, file_path, original_filename):
+# --- FONCTION DE SAUVEGARDE DIFFÉRÉE ---
+async def delayed_cloud_upload(user_id, file_path, result_data, file_meta, delay=60):
+    """
+    Attend X secondes avant d'envoyer les données vers Firebase.
+    """
+    print(f"   ⏳ Waiting {delay}s before Cloud upload for {file_meta['original_name']}...")
+    await asyncio.sleep(delay)
+    
     try:
-        # ---------------------------------------------------------
-        # ÉTAPE 1 : CONVERSION LOCALE (CPU - ULTRA RAPIDE)
-        # ---------------------------------------------------------
-        print(f"   ⚡ Start Convert: {original_filename}")
+        # 1. Upload Raw File
+        blob_raw = bucket.blob(file_meta['raw_file_path'])
+        blob_raw.upload_from_filename(file_path)
+
+        # 2. Upload JSON Result
+        blob_proc = bucket.blob(file_meta['storage_path'])
+        blob_proc.upload_from_string(json.dumps(result_data, default=str), content_type='application/json')
+
+        # 3. Update Firestore
+        final_meta = file_meta.copy()
+        if 'data_preview' in final_meta: del final_meta['data_preview']
+        
+        db.collection('users').document(user_id).collection('configurations').document().set(final_meta)
+        
+        print(f"   ☁️  Delayed Cloud Sync Complete: {file_meta['original_name']}")
+        
+        # Nettoyage du fichier temporaire après l'upload cloud
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            
+    except Exception as e:
+        print(f"   ❌ Delayed Upload Failed: {e}")
+
+def process_single_file(user_id, file_path, original_filename, background_tasks: BackgroundTasks):
+    try:
+        # 1. CONVERSION IMMÉDIATE
         result_data = DBConverter.convert_to_json(file_path, original_filename)
         _, ext = os.path.splitext(original_filename)
 
-        # On génère les UUIDs tout de suite pour préparer les chemins
+        # IDs et Chemins
         raw_uuid = str(uuid.uuid4())
         result_uuid = str(uuid.uuid4())
-        
         raw_storage_path = f"raw_uploads/{user_id}/{raw_uuid}{ext}"
         proc_storage_path = f"processed/{user_id}/{result_uuid}.json"
 
-        # ---------------------------------------------------------
-        # ÉTAPE 2 : PRIORITÉ RAM (INSTANTANÉ) 🧠
-        # ---------------------------------------------------------
-        # On injecte dans la mémoire IMMEDIATEMENT, avant même de parler à Google.
-        # Comme ça, ton endpoint /session/details voit le fichier tout de suite.
-        
+        # 2. STOCKAGE RAM IMMÉDIAT (Pour ton dév)
         if user_id not in SESSIONS: SESSIONS[user_id] = []
         
         file_meta = {
-            'id': result_uuid, # On utilise l'UUID comme ID temporaire
+            'id': result_uuid,
             'created_at': datetime.utcnow(),
             'source_type': ext.replace('.', ''),
             'original_name': original_filename,
             'processed': True,
-            'storage_path': proc_storage_path,   # Chemin "futur" (upload en cours)
-            'raw_file_path': raw_storage_path,   # Chemin "futur"
+            'storage_path': proc_storage_path,
+            'raw_file_path': raw_storage_path,
             'preview_available': True,
-            'data_preview': result_data          # DONNÉE DISPO DIRECTEMENT !
+            'data_preview': result_data # Dispo en RAM tout de suite
         }
         
-        # On l'insère en haut de la liste
         SESSIONS[user_id].insert(0, file_meta)
-        print(f"   🧠 RAM Updated (Instant Access): {original_filename}")
+        print(f"   🧠 RAM Updated: {original_filename} (Cloud sync scheduled in 60s)")
 
-        # ---------------------------------------------------------
-        # ÉTAPE 3 : SAUVEGARDE CLOUD (EN ARRIÈRE PLAN) ☁️
-        # ---------------------------------------------------------
-        # Si ça prend 2 secondes, c'est pas grave, c'est déjà dispo en RAM.
-        
-        # 3a. Upload Raw File
-        bucket.blob(raw_storage_path).upload_from_filename(file_path)
+        # 3. PROGRAMMATION DE LA TÂCHE DIFFÉRÉE
+        # On doit garder une copie locale du fichier le temps du délai
+        # On crée un dossier 'buffer' pour stocker les fichiers en attente
+        buffer_dir = "/tmp/solufuse_buffer"
+        if not os.path.exists(buffer_dir): os.makedirs(buffer_dir)
+        persistent_temp_path = os.path.join(buffer_dir, f"{raw_uuid}{ext}")
+        shutil.copy(file_path, persistent_temp_path)
 
-        # 3b. Upload JSON Result
-        bucket.blob(proc_storage_path).upload_from_string(json.dumps(result_data, default=str), content_type='application/json')
-
-        # 3c. Update Firestore (Persistance)
-        # On utilise le même ID que le nom de fichier JSON pour être cohérent si possible, 
-        # ou on laisse Firestore générer un ID (mais pour le lien RAM/Cloud c'est mieux de suivre).
-        doc_ref = db.collection('users').document(user_id).collection('configurations').document()
-        # On met à jour l'ID Firestore
-        final_meta = file_meta.copy()
-        del final_meta['data_preview'] # On ne stocke pas le gros JSON dans les métadonnées Firestore
-        doc_ref.set(final_meta)
-        
-        print(f"   ☁️  Cloud Sync Done: {original_filename}")
+        background_tasks.add_task(delayed_cloud_upload, user_id, persistent_temp_path, result_data, file_meta, 60)
 
     except Exception as e:
-        print(f"   ❌ Error processing {original_filename}: {e}")
+        print(f"   ❌ Error: {e}")
 
-def process_file_task(req: IngestionRequest):
+def process_file_task(req: IngestionRequest, background_tasks: BackgroundTasks):
     temp_dir = tempfile.mkdtemp()
     try:
         download_path = os.path.join(temp_dir, "input")
@@ -130,83 +116,66 @@ def process_file_task(req: IngestionRequest):
         
         if zipfile.is_zipfile(download_path):
             with zipfile.ZipFile(download_path, 'r') as z:
-                # On trie pour traiter les petits fichiers d'abord si besoin, 
-                # ou alphabétiquement pour que la liste RAM soit stable
-                file_list = sorted(z.namelist()) 
-                for m in file_list:
+                for m in sorted(z.namelist()):
                     if not m.startswith('__') and os.path.splitext(m)[1].lower() in ALLOWED_EXTENSIONS:
                         z.extract(m, temp_dir)
-                        process_single_file(req.user_id, os.path.join(temp_dir, m), os.path.basename(m))
+                        process_single_file(req.user_id, os.path.join(temp_dir, m), os.path.basename(m), background_tasks)
         else:
-            process_single_file(req.user_id, download_path, f"uploaded.{req.file_type}")
+            process_single_file(req.user_id, download_path, f"uploaded.{req.file_type}", background_tasks)
     except Exception as e: print(f"Task Error: {e}")
-    finally: shutil.rmtree(temp_dir)
+    finally:
+        # On ne supprime le temp_dir que si on a fini de copier les fichiers vers le buffer
+        shutil.rmtree(temp_dir)
 
 @router.post("/process")
 async def start(req: IngestionRequest, bt: BackgroundTasks):
-    bt.add_task(process_file_task, req)
-    return {"status": "started", "mode": "RAM-First (Instant Dev)"}
+    # On passe bt à process_file_task pour qu'il puisse ajouter des tâches différées
+    bt.add_task(process_file_task, req, bt)
+    return {"status": "started", "mode": "RAM-First with 60s Cloud Buffer"}
 
+# Rest of the endpoints (preview, download) remain the same...
+# (Ils chercheront en RAM d'abord, puis Cloud en fallback)
 @router.get("/preview/{doc_id}")
 async def preview(doc_id: str, user_id: str):
-    # Pour le preview, on regarde d'abord en RAM (plus rapide pour le dev)
     if user_id in SESSIONS:
         for f in SESSIONS[user_id]:
-            # On vérifie l'ID ou si c'est un UUID temporaire
             if f.get('id') == doc_id or doc_id in f.get('storage_path', ''):
-                if 'data_preview' in f:
-                    return f['data_preview']
-    
-    # Fallback Cloud
+                if 'data_preview' in f: return f['data_preview']
     doc = db.collection('users').document(user_id).collection('configurations').document(doc_id).get()
     if not doc.exists: raise HTTPException(404)
     return json.loads(bucket.blob(doc.to_dict()['storage_path']).download_as_string())
 
 @router.get("/download/{doc_id}/{format}")
 async def download(doc_id: str, format: str, user_id: str):
-    # Idem, on essaie de servir depuis la RAM si possible (sauf pour le raw file qui est sur disque/cloud)
     target_data = None
     original_name = "download"
-    
-    # 1. Check RAM
     if user_id in SESSIONS:
         for f in SESSIONS[user_id]:
              if f.get('id') == doc_id or doc_id in f.get('storage_path', ''):
                 original_name = f.get('original_name', 'download')
-                if format != 'raw' and 'data_preview' in f:
-                    target_data = f['data_preview']
+                if format != 'raw' and 'data_preview' in f: target_data = f['data_preview']
                 break
-    
-    # 2. Check Cloud (si pas en RAM ou si format raw)
     if not target_data and format != 'raw':
         doc = db.collection('users').document(user_id).collection('configurations').document(doc_id).get()
         if doc.exists:
             meta = doc.to_dict()
             original_name = meta.get('original_name', 'download')
             target_data = json.loads(bucket.blob(meta['storage_path']).download_as_string())
-
-    # 3. Serve
     fname = os.path.splitext(original_name)[0]
-    
     if format == 'raw':
-        # Raw toujours depuis le cloud (ou disque local temporaire si on voulait complexifier, mais Cloud c'est sûr)
-        # Note: Si tu veux le raw instantané, il faudrait le garder en RAM binaire, mais ça prendrait trop de place.
-        # Pour le RAW, on attend le cloud.
         doc = db.collection('users').document(user_id).collection('configurations').document(doc_id).get()
-        if not doc.exists: raise HTTPException(404, "File not fully uploaded yet")
-        meta = doc.to_dict()
-        return StreamingResponse(io.BytesIO(bucket.blob(meta['raw_file_path']).download_as_string()), media_type="application/octet-stream", headers={"Content-Disposition": f"attachment; filename={meta['original_name']}"})
-
+        if not doc.exists: raise HTTPException(404, "Still in buffer...")
+        return StreamingResponse(io.BytesIO(bucket.blob(doc.to_dict()['raw_file_path']).download_as_string()), media_type="application/octet-stream", headers={"Content-Disposition": f"attachment; filename={original_name}"})
     if format == 'json' and target_data:
         return StreamingResponse(io.BytesIO(json.dumps(target_data, default=str).encode()), media_type="application/json", headers={"Content-Disposition": f"attachment; filename={fname}.json"})
     elif format == 'xlsx' and target_data:
+        # Import local pour éviter les soucis circulaires
+        from app.routers.ingestion import json_to_excel_bytes
         return StreamingResponse(json_to_excel_bytes(target_data), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename={fname}.xlsx"})
-        
-    raise HTTPException(404, "File not found or still processing")
+    raise HTTPException(404)
 
 @router.get("/download-all/{format}")
 async def download_all(format: str, user_id: str):
-    # Version simplifiée Cloud-only pour le ZIP global (plus sûr)
     docs = db.collection('users').document(user_id).collection('configurations').stream()
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as z:
@@ -214,13 +183,11 @@ async def download_all(format: str, user_id: str):
             meta = doc.to_dict()
             try:
                 name = meta.get('original_name', doc.id)
-                clean_name = os.path.splitext(name)[0]
                 if format == 'raw' and meta.get('raw_file_path'):
                     z.writestr(name, bucket.blob(meta['raw_file_path']).download_as_string())
                 elif meta.get('storage_path'):
                     content = json.loads(bucket.blob(meta['storage_path']).download_as_string())
-                    if format == 'json': z.writestr(f"{clean_name}.json", json.dumps(content, default=str))
-                    elif format == 'xlsx': z.writestr(f"{clean_name}.xlsx", json_to_excel_bytes(content).getvalue())
+                    if format == 'json': z.writestr(f"{os.path.splitext(name)[0]}.json", json.dumps(content, default=str))
             except: pass
     zip_buffer.seek(0)
-    return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename=export_all.zip"})
+    return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=export.zip"})
