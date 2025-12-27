@@ -47,11 +47,11 @@ def get_details(token: str = Depends(get_current_token)):
 
 @router.get("/download")
 def download_raw_file(filename: str = Query(...), token: str = Depends(get_current_token)):
-    # This endpoint is crucial for the "RAW" button in frontend
+    # CORRECTION CRITIQUE : Permet le téléchargement RAW
     safe_filename = os.path.basename(filename)
     file_path = os.path.join("/app/storage", token, safe_filename)
     if not os.path.exists(file_path):
-         raise HTTPException(status_code=404, detail=f"File '{safe_filename}' not found.")
+         raise HTTPException(status_code=404, detail=f"File not found.")
     return FileResponse(file_path, filename=safe_filename)
 
 @router.delete("/file/{path:path}")
