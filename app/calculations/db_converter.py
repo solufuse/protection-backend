@@ -5,7 +5,6 @@ import os
 import io
 
 def extract_data_from_db(file_content: bytes):
-    """Lit SI2S, LF1S, MDB via SQLite"""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".sqlite") as tmp:
         tmp.write(file_content)
         tmp_path = tmp.name
@@ -28,7 +27,7 @@ def generate_excel_bytes(data_frames: dict) -> io.BytesIO:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         if not data_frames:
-            pd.DataFrame({'Info': ['Vide']}).to_excel(writer, sheet_name='Erreur')
+            pd.DataFrame({'Info': ['Empty']}).to_excel(writer, sheet_name='Error')
         else:
             for table_name, df in data_frames.items():
                 sheet_name = table_name[:31]

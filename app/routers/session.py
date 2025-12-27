@@ -27,10 +27,13 @@ async def upload_files(files: List[UploadFile] = File(...), token: str = Depends
         else:
             session_manager.add_file(token, file.filename, content)
             count += 1
-    return {"message": f"{count} fichiers sauvegardés."}
+    return {"message": f"{count} files saved."}
 
 @router.get("/details")
 def get_details(token: str = Depends(get_current_token)):
+    # Force reload to ensure details match disk
+    session_manager.get_files(token)
+    
     user_storage_dir = os.path.join("/app/storage", token)
     files_info = []
     if os.path.exists(user_storage_dir):
@@ -38,20 +41,28 @@ def get_details(token: str = Depends(get_current_token)):
             for name in files:
                 if name.startswith('.'): continue
                 full_path = os.path.join(root, name)
-                rel_path = os.path.relpath(full_path, user_storage_dir).replace("\\", "/")
+                # Use flat filename to match session_manager keys
+                size = os.path.getsize(full_path)
                 files_info.append({
-                    "path": rel_path, "filename": name,
-                    "size": os.path.getsize(full_path), "content_type": "application/octet-stream"
+                    "path": name, 
+                    "filename": name,
+                    "size": size, 
+                    "content_type": "application/octet-stream"
                 })
     return {"active": True, "files": files_info}
 
 @router.get("/download")
 def download_raw_file(filename: str = Query(...), token: str = Depends(get_current_token)):
-    # FIX: Ajout de la route manquante pour le bouton RAW
+    # AJOUT DE LA FONCTION MANQUANTE
     safe_filename = os.path.basename(filename)
     file_path = os.path.join("/app/storage", token, safe_filename)
+    
     if not os.path.exists(file_path):
-         raise HTTPException(status_code=404, detail="File not found")
+         # Tentative de rechargement/vérification
+         session_manager.get_files(token)
+         if not os.path.exists(file_path):
+             raise HTTPException(status_code=404, detail=f"File '{safe_filename}' not found on disk.")
+             
     return FileResponse(file_path, filename=safe_filename)
 
 @router.delete("/file/{path:path}")
