@@ -18,7 +18,7 @@ app.include_router(auth.router)
 app.include_router(session.router)
 app.include_router(ingestion.router)
 app.include_router(engine.router)
-app.include_router(protection.router)  # <--- AJOUT CRITIQUE
+app.include_router(protection.router)
 app.include_router(inrush.router)
 app.include_router(extraction.router)
 app.include_router(loadflow.router)

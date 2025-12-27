@@ -4,13 +4,14 @@ from typing import Optional
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
-# Utilisation de db_converter pour éviter l'erreur d'import
+# Using db_converter to match existing files
 from app.calculations import db_converter, topology_manager
 import json
 import pandas as pd
 import io
 
-router = APIRouter(prefix="/engine-pc", tags=["Protection Coordination (PC)"])
+# CHANGED PREFIX HERE
+router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
 
 # --- HELPERS ---
 def is_supported(fname: str) -> bool:
