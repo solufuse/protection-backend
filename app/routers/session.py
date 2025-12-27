@@ -27,7 +27,7 @@ async def upload_files(files: List[UploadFile] = File(...), token: str = Depends
         else:
             session_manager.add_file(token, file.filename, content)
             count += 1
-    return {"message": f"{count} files saved."}
+    return {"message": f"{count} fichiers sauvegardés."}
 
 @router.get("/details")
 def get_details(token: str = Depends(get_current_token)):
@@ -45,13 +45,13 @@ def get_details(token: str = Depends(get_current_token)):
                 })
     return {"active": True, "files": files_info}
 
-# --- C'EST CETTE FONCTION QUI MANQUAIT POUR LE DOWNLOAD RAW ---
 @router.get("/download")
 def download_raw_file(filename: str = Query(...), token: str = Depends(get_current_token)):
+    # FIX: Ajout de la route manquante pour le bouton RAW
     safe_filename = os.path.basename(filename)
     file_path = os.path.join("/app/storage", token, safe_filename)
     if not os.path.exists(file_path):
-         raise HTTPException(status_code=404, detail=f"File not found.")
+         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file_path, filename=safe_filename)
 
 @router.delete("/file/{path:path}")
