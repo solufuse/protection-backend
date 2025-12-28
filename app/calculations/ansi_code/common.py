@@ -12,7 +12,6 @@ def is_supported_protection(fname: str) -> bool:
     return e.endswith('.si2s') or e.endswith('.mdb')
 
 def find_bus_data(dfs_dict: dict, bus_name: str) -> dict:
-    """Retrieves the SCIECLGSum1 row for a specific bus."""
     if not bus_name: return None
     target_df = None
     for k in dfs_dict.keys():
@@ -29,7 +28,6 @@ def find_bus_data(dfs_dict: dict, bus_name: str) -> dict:
     except: return None
 
 def build_global_transformer_map(files: Dict[str, bytes]) -> Dict[str, Dict]:
-    """Scans all files to build a static map of transformers (MVA, Taps)."""
     global_map = {}
     for fname, content in files.items():
         if not is_supported_protection(fname): continue
@@ -64,7 +62,6 @@ def calc_In(mva, kv):
     return (mva * 1000) / (math.sqrt(3) * kv)
 
 def calc_inrush_rms_decay(i_nom: float, ratio: float, tau_ms: float, time_s: float) -> float:
-    """Calculates RMS Inrush current using decay curve."""
     if tau_ms <= 0: return 0.0
     tau_s = tau_ms / 1000.0
     i_rms_initial = (i_nom * ratio) / math.sqrt(2)
@@ -73,9 +70,6 @@ def calc_inrush_rms_decay(i_nom: float, ratio: float, tau_ms: float, time_s: flo
 # --- MAIN DATA BUILDER ---
 
 def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> Dict[str, Any]:
-    """
-    Generates the 'data_settings' dictionary containing all physical/electrical values.
-    """
     bus_amont = plan.bus_from
     bus_aval = plan.bus_to
     
@@ -86,40 +80,38 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
     kvnom_busfrom = float(data_from.get("kVnom", 0) or 0)
     kvnom_busto = float(data_to.get("kVnom", 0) or 0)
     
+    # ETAP IEC Columns: Ik3ph, IkLL (2ph), IkLG (1ph)
     from_ikLL = float(data_from.get("IkLL", 0) or 0) 
     from_ikLG = float(data_from.get("IkLG", 0) or 0) 
     from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
     to_ikLL = float(data_to.get("IkLL", 0) or 0)
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
 
-    # 2. Base Container (With RAW DATA restored)
+    # 2. Base Container (Restored Raw Data)
     data_settings = {
         "type": plan.type,
         "Bus_Prim": bus_amont,
         "Bus_Sec": bus_aval,
         "kVnom_busfrom": kvnom_busfrom,
         "kVnom_busto": kvnom_busto,
-        "raw_data_from": data_from, # <-- Restored
-        "raw_data_to": data_to      # <-- Restored
+        "raw_data_from": data_from, 
+        "raw_data_to": data_to      
     }
     
     # 3. Transformer Specific Logic
     if plan.type.upper() == "TRANSFORMER":
         tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
         
-        # Static Data (Scan)
         tx_data_etap = global_tx_map.get(tx_id, {})
         mva_tx = float(tx_data_etap.get("MVA", 0))
         maxmva_tx = float(tx_data_etap.get("MaxMVA", 0))
         min_tap = float(tx_data_etap.get("MinTap", 0)) 
         step_tap = float(tx_data_etap.get("StepTap", 0))
         
-        # User Config
         tx_user_config = next((t for t in full_config.transformers if t.name == tx_id), None)
         ratio_iencl = tx_user_config.ratio_iencl if tx_user_config else 8.0
         tau_ms = tx_user_config.tau_ms if tx_user_config else 100.0
         
-        # Tap Calculation
         try:
             percent_drop = 0
             if step_tap != 0 and abs(min_tap) > 1: percent_drop = (abs(min_tap) * abs(step_tap)) / 100.0
@@ -128,16 +120,13 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
             kvnom_busfrom_tap_min = kvnom_busfrom * (1 - percent_drop)
         except: kvnom_busfrom_tap_min = kvnom_busfrom
         
-        # Nominal Currents
         in_prim = calc_In(mva_tx, kvnom_busfrom) 
         in_sec = calc_In(mva_tx, kvnom_busto)    
         in_prim_tap = calc_In(mva_tx, kvnom_busfrom_tap_min) 
         
-        # Inrush
         inrush_val_50ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.05)
         inrush_val_900ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.9)
         
-        # Reflected Currents
         ratio_u = kvnom_busto / kvnom_busfrom if kvnom_busfrom else 0
         ikLL_sec_ref_prim = to_ikLL * ratio_u
         ik3ph_sec_ref_prim = to_ik3ph * ratio_u
@@ -152,12 +141,17 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
             "In_prim_Un": round(in_prim, 2),        
             "In_prim_TapMin": round(in_prim_tap, 2),
             "In_sec_Un": round(in_sec, 2),          
-            "Isc_2ph_min_prim [IkLL]": from_ikLL,       
-            "Isc_zero_min_prim [IkLG]": from_ikLG,      
-            "Isc_2ph_min_sec_ref": round(ikLL_sec_ref_prim, 3), 
-            "Isc_2ph_min_sec_ref_Formula": f"I_sec({round(to_ikLL,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
-            "Isc_3ph_max_sec_ref": round(ik3ph_sec_ref_prim, 3),
-            "Isc_3ph_max_sec_ref_Formula": f"I_sec({round(to_ik3ph,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
+            
+            # --- RENAMING TO IEC STANDARD ---
+            "Ik2min_prim [IkLL]": from_ikLL,       
+            "Ik1min_prim [IkLG]": from_ikLG,      
+            
+            "Ik2min_sec_ref": round(ikLL_sec_ref_prim, 3), 
+            "Ik2min_sec_ref_Formula": f"I_sec({round(to_ikLL,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
+            
+            "Ik3max_sec_ref": round(ik3ph_sec_ref_prim, 3),
+            "Ik3max_sec_ref_Formula": f"I_sec({round(to_ik3ph,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
+            
             "inrush_50ms": round(inrush_val_50ms, 2),
             "inrush_50ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.05 / {tau_ms/1000})",
             "inrush_900ms": round(inrush_val_900ms, 2),
@@ -165,12 +159,12 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         })
 
     else:
-        # Generic Logic
+        # Generic
         data_settings.update({
             "status": "BASIC_INFO",
             "kVnom": kvnom_busfrom,
-            "Isc_3ph [Ik3ph]": from_ik3ph,
-            "Isc_2ph [IkLL]": from_ikLL
+            "Ik3max [Ik3ph]": from_ik3ph,
+            "Ik2min [IkLL]": from_ikLL
         })
         
     return data_settings

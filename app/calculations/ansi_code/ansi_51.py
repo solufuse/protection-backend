@@ -2,21 +2,17 @@
 from app.schemas.protection import ProtectionPlan, GlobalSettings, ProjectConfig
 from app.services import session_manager
 from app.calculations import db_converter, topology_manager
-from app.calculations.ansi_code import common # <-- IMPORT DU COMMUN
+from app.calculations.ansi_code import common
 import pandas as pd
 import io
 import copy
 from typing import List, Dict, Any
 
 def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> dict:
-    """
-    ANSI 51 Logic utilizing shared common data settings.
-    """
     settings = full_config.settings
     std_51 = settings.std_51
     
-    # 1. Get Shared Electrical Data (Physic Engine)
-    # This ensures consistency across all ANSI codes
+    # 1. Get Shared Electrical Data
     data_settings = common.get_electrical_parameters(plan, full_config, dfs_dict, global_tx_map)
     
     # 2. Prepare containers
@@ -25,15 +21,17 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
     
     # 3. Calculate Thresholds based on Data
     if plan.type.upper() == "TRANSFORMER":
-        # Extract needed values
+        # Extract needed values (USING NEW IEC NAMES)
         in_prim_tap = data_settings.get("In_prim_TapMin", 0)
-        ikLL_sec_ref_prim = data_settings.get("Isc_2ph_min_sec_ref", 0)
+        
+        # We target Ik2min_sec_ref for backup protection
+        ik2min_ref = data_settings.get("Ik2min_sec_ref", 0)
         
         # Threshold 1: Overload (Surcharge)
         pickup_i1 = round(std_51.coeff_stab_max * in_prim_tap, 2)
         
         # Threshold 2: Backup (Short-Circuit)
-        backup_i2 = round(std_51.coeff_backup_min * (ikLL_sec_ref_prim * 1000), 2)
+        backup_i2 = round(std_51.coeff_backup_min * (ik2min_ref * 1000), 2)
         
         thresholds["pickup_amps"] = pickup_i1
         thresholds["backup_amps"] = backup_i2
@@ -45,12 +43,11 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         }
         
         formulas_section["F_I2_backup"] = {
-            "Fdata_si2s": f"Isc_2ph_min_ref={round(ikLL_sec_ref_prim*1000, 2)}A",
-            "Fcalculation": f"{std_51.coeff_backup_min} * {round(ikLL_sec_ref_prim*1000, 2)} = {backup_i2} A",
+            "Fdata_si2s": f"Ik2min_ref={round(ik2min_ref*1000, 2)}A",
+            "Fcalculation": f"{std_51.coeff_backup_min} * {round(ik2min_ref*1000, 2)} = {backup_i2} A",
             "Fremark": "Seuil Court-Circuit (Backup)"
         }
         
-    # 4. Status Check
     status = "computed"
     comments = []
     if data_settings.get("kVnom_busfrom") == 0: 
@@ -61,7 +58,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         "status": status,
         "topology_used": {"bus_from": data_settings.get("Bus_Prim"), "bus_to": data_settings.get("Bus_Sec")},
         "config": { "settings": { "std_51": std_51.dict() }, "type": plan.type, "ct_primary": plan.ct_primary },
-        "data_settings": data_settings, # On renvoie le bloc commun
+        "data_settings": data_settings,
         "formulas": formulas_section,
         "calculated_thresholds": thresholds,
         "comments": comments
@@ -69,7 +66,6 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
 
 def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
     files = session_manager.get_files(token)
-    # Using the builder from common
     global_tx_map = common.build_global_transformer_map(files)
     
     results = []
@@ -86,7 +82,6 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
                 res = calculate(plan, file_config, dfs, global_tx_map)
                 ds = res.get("data_settings", {})
                 
-                # Filtering empty results
                 if res["status"] == "error_topology": continue
                 if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: continue 
                 
