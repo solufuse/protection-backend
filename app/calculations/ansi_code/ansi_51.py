@@ -38,9 +38,7 @@ def find_bus_data(dfs_dict: dict, bus_name: str) -> dict:
         return None
 
 def build_global_transformer_map(files: Dict[str, bytes]) -> Dict[str, Dict]:
-    """
-    Scanne les fichiers pour avoir les infos statiques des transfos (MVA, Taps).
-    """
+    """Scanne les fichiers pour avoir les infos statiques des transfos (MVA, Taps)."""
     global_map = {}
     for fname, content in files.items():
         if not _is_supported_protection(fname): continue
@@ -68,7 +66,9 @@ def build_global_transformer_map(files: Dict[str, bytes]) -> Dict[str, Dict]:
                     if val_max > global_map[tid]["MaxMVA"]: global_map[tid]["MaxMVA"] = val_max
                     
                     val_min = float(row.get("Min%Tap", 0) or 0)
-                    if val_min != 0 and global_map[tid]["MinTap"] == 0: global_map[tid]["MinTap"] = val_min
+                    # On prend la plus grande valeur absolue non nulle (pour capturer le -15% ou -12 steps)
+                    curr_min = global_map[tid]["MinTap"]
+                    if abs(val_min) > abs(curr_min): global_map[tid]["MinTap"] = val_min
                         
                     val_step = float(row.get("Step%Tap", 0) or 0)
                     if val_step != 0 and global_map[tid]["StepTap"] == 0: global_map[tid]["StepTap"] = val_step
@@ -83,26 +83,38 @@ def calc_In(mva, kv):
 
 def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, global_tx_map: dict) -> dict:
     """
-    Logique ANSI 51 avec formule Min%Tap corrigée.
+    Logique ANSI 51 format Schneider.
     """
     bus_amont = plan.bus_from
     bus_aval = plan.bus_to
     
+    # 1. Extraction Données Électriques
     data_from = find_bus_data(dfs_dict, bus_amont) or {}
     data_to = find_bus_data(dfs_dict, bus_aval) or {}
     
     kvnom_busfrom = float(data_from.get("kVnom", 0) or 0)
     kvnom_busto = float(data_to.get("kVnom", 0) or 0)
     
-    busfrom_ipp3kph = float(data_from.get("IPPk3ph", 0) or 0)
-    busto_ipp3kph = float(data_to.get("IPPk3ph", 0) or 0)
-    busfrom_prefault = float(data_from.get("PreFaultNom", 100) or 100)
-    busto_prefault = float(data_to.get("PreFaultNom", 100) or 100)
+    # Extraction des courants de court-circuit spécifiques (Schneider requirements)
+    # Ik3ph = Triphasé symétrique
+    # IkLL = Biphasé (Phase-Phase)
+    # IkLG = Monophasé (Phase-Terre / Homopolaire)
     
+    # Bus Amont
+    from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
+    from_ikLL = float(data_from.get("IkLL", 0) or 0) # CC Biphasé
+    from_ikLG = float(data_from.get("IkLG", 0) or 0) # CC Homopolaire (Terre)
+    
+    # Bus Aval
+    to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
+    to_ikLL = float(data_to.get("IkLL", 0) or 0)
+    to_ikLG = float(data_to.get("IkLG", 0) or 0)
+
+    # 2. Structure Data Settings
     data_settings = {"type": plan.type}
     formulas_section = {}
     
-    # >>>> LOGIQUE TRANSFORMATEUR <<<<
+    # >>>> TRANSFORMATEUR <<<<
     if plan.type.upper() == "TRANSFORMER":
         
         tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
@@ -110,68 +122,86 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, gl
         
         mva_tx = float(tx_data.get("MVA", 0))
         maxmva_tx = float(tx_data.get("MaxMVA", 0))
-        min_tap = float(tx_data.get("MinTap", 0)) # ex: -15 (pour -15%)
+        min_tap = float(tx_data.get("MinTap", 0)) 
         step_tap = float(tx_data.get("StepTap", 0))
         
-        # --- CORRECTION FORMULE ---
-        # Si MinTap est un %, on l'utilise directement pour la chute de tension.
-        # kV_tap = kV_nom * (1 - |MinTap|/100)
+        # Calcul Tension au Tap Min (pour I nominal max)
+        # Logique: Si Step != 0, MinTap est probablement un nb de steps -> % = Steps * StepSize
+        # Sinon, MinTap est direct en %
         try:
-            percent_drop = abs(min_tap) / 100.0
-            if percent_drop > 0.3: percent_drop = 0 # Sécurité
-            kvnom_busto_tap1 = kvnom_busfrom * (1 - percent_drop) 
-        except: kvnom_busto_tap1 = 0
-        
-        in_from = calc_In(mva_tx, kvnom_busfrom)
-        in_to = calc_In(mva_tx, kvnom_busto)
-        # Courant au primaire avec tension réduite (worst case)
-        # Note: Si la tension baisse, le courant augmente pour P=cste
-        in_from_tap = calc_In(mva_tx, kvnom_busto_tap1) 
-        
-        try:
-            r_v = kvnom_busto / kvnom_busfrom if kvnom_busfrom else 0
-            f_ipp_from = (busfrom_ipp3kph * r_v) * (busfrom_prefault / 100.0)
-            f_ipp_to = (busto_ipp3kph * r_v) * (busto_prefault / 100.0)
+            percent_drop = 0
+            if step_tap != 0 and abs(min_tap) > 1: 
+                # Hypothèse: MinTap = nb steps (ex: 12)
+                percent_drop = (abs(min_tap) * abs(step_tap)) / 100.0
+            else:
+                # Hypothèse: MinTap = % direct (ex: 15)
+                percent_drop = abs(min_tap) / 100.0
+                
+            if percent_drop > 0.3: percent_drop = 0 # Sécurité anti-aberration
+            
+            kvnom_busfrom_tap_min = kvnom_busfrom * (1 - percent_drop)
         except: 
-            f_ipp_from = 0
-            f_ipp_to = 0
+            kvnom_busfrom_tap_min = kvnom_busfrom
+        
+        # Courants Nominaux
+        in_prim = calc_In(mva_tx, kvnom_busfrom) # In @ Un
+        in_sec = calc_In(mva_tx, kvnom_busto)    # In @ Sec
+        in_prim_tap = calc_In(mva_tx, kvnom_busfrom_tap_min) # In @ Un-Tap (Le fameux 251.98A)
+        
+        # --- COURANTS RAMENES (Referred Currents) ---
+        # Ratio de transformation k = U2 / U1
+        ratio_u = kvnom_busto / kvnom_busfrom if kvnom_busfrom else 0
+        
+        # CC Biphasé Min Secondaire ramené au Primaire
+        # I_prim = I_sec * (U2 / U1)
+        ikLL_sec_ref_prim = to_ikLL * ratio_u
+        
+        # CC Triphasé Max Secondaire ramené au Primaire
+        # Note: Schneider demande le Max. Si on est dans le fichier "Scc_max", c'est bon.
+        ik3ph_sec_ref_prim = to_ik3ph * ratio_u
 
         data_settings.update({
+            # Données Plaque
             "mva_tx": mva_tx,
             "maxmva_tx": maxmva_tx,
             "kVnom_busfrom": kvnom_busfrom,
             "kVnom_busto": kvnom_busto,
-            "kVnom_busto_tap1": round(kvnom_busto_tap1, 3),
-            "Min%Tap_tap1": min_tap,
-            "Step%Tap_tap": step_tap,
-            "In_tx_busfrom": round(in_from, 2),
-            "In_tx_busto": round(in_to, 2),
-            "In_tx_busfrom_tap_1": round(in_from_tap, 2),
-            "BusFrom_IPP3kph": busfrom_ipp3kph,
-            "Busto_IPP3kph": busto_ipp3kph,
-            "BusFrom_f_IPP3kph": round(f_ipp_from, 3),
-            "Busto_f_IPP3kph": round(f_ipp_to, 3),
-            "inrush_tx": {"inrush_50ms": "TBD", "inrush_900ms": "TBD"}
+            "Min%Tap_val": min_tap,
+            "Step%Tap_val": step_tap,
+            
+            # Courants Nominaux Calculés
+            "In_prim_Un": round(in_prim, 2),        # ex: 218.1 A
+            "In_prim_TapMin": round(in_prim_tap, 2),# ex: 251.98 A
+            "In_sec_Un": round(in_sec, 2),          # ex: 2336.9 A
+            
+            # Courants Court-Circuit (Format Schneider)
+            "Isc_2ph_min_prim": from_ikLL,       # CC Biphasé Primaire
+            "Isc_zero_min_prim": from_ikLG,      # CC Homopolaire Primaire
+            "Isc_2ph_min_sec_ref": round(ikLL_sec_ref_prim, 3), # Biphasé sec ramené
+            "Isc_3ph_max_sec_ref": round(ik3ph_sec_ref_prim, 3), # Triphasé sec ramené
+            
+            # Inrush (Placeholders)
+            "inrush_50ms": "TBD",
+            "inrush_900ms": "TBD"
         })
         
+        # Formules
         std_51 = settings.std_51
         formulas_section["F_I1_overloads"] = {
-            "Fdata_si2s": f"In_tx_busfrom={round(in_from,2)}A",
-            "Fcalculation": f"{std_51.coeff_stab_max} * {round(in_from,2)}",
-            "Ftime": "Long Time",
-            "Fremark": "Protection surcharge"
+            "Fdata_si2s": f"In_prim_TapMin={round(in_prim_tap,2)}A",
+            "Fcalculation": f"{std_51.coeff_stab_max} * {round(in_prim_tap,2)}",
+            "Fremark": "Seuil Surcharge (1.2 x In_régleur)"
         }
 
     else:
-        # Autres types (INCOMER, COUPLING)
+        # Autres
         data_settings.update({
             "status": "BASIC_INFO",
-            "kVnom_busfrom": kvnom_busfrom,
-            "kVnom_busto": kvnom_busto,
-            "BusFrom_IPP3kph": busfrom_ipp3kph,
-            "Busto_IPP3kph": busto_ipp3kph,
+            "kVnom": kvnom_busfrom,
+            "Isc_3ph": from_ik3ph,
+            "Isc_2ph": from_ikLL,
+            "Isc_zero": from_ikLG
         })
-        formulas_section["F_Global"] = "TBD"
 
     # --- RESULTAT ---
     
@@ -225,7 +255,7 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
                 res = calculate(plan, file_config.settings, dfs, global_tx_map)
                 ds = res.get("data_settings", {})
                 if res["status"] == "error_topology": continue
-                if ds.get("kVnom_busfrom", 0) == 0: continue 
+                if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: continue 
 
                 res["plan_id"] = plan.id
                 res["plan_type"] = plan.type
@@ -257,6 +287,6 @@ def generate_excel(results: List[dict]) -> bytes:
         df.to_excel(writer, sheet_name="Data Settings", index=False)
         ws = writer.sheets["Data Settings"]
         for col in ws.columns:
-            try: ws.column_dimensions[col[0].column_letter].width = 18
+            try: ws.column_dimensions[col[0].column_letter].width = 22
             except: pass
     return output.getvalue()
