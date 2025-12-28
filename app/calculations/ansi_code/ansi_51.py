@@ -83,54 +83,51 @@ def calc_In(mva, kv):
 
 def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, global_tx_map: dict) -> dict:
     """
-    Logique ANSI 51 séparée par type d'équipement.
+    Logique ANSI 51 avec formule Min%Tap corrigée.
     """
     bus_amont = plan.bus_from
     bus_aval = plan.bus_to
     
-    # Données Brutes (Communes à tous)
     data_from = find_bus_data(dfs_dict, bus_amont) or {}
     data_to = find_bus_data(dfs_dict, bus_aval) or {}
     
-    # Récupération tension nominale (utile partout)
     kvnom_busfrom = float(data_from.get("kVnom", 0) or 0)
     kvnom_busto = float(data_to.get("kVnom", 0) or 0)
     
-    # Isc (utile partout)
     busfrom_ipp3kph = float(data_from.get("IPPk3ph", 0) or 0)
     busto_ipp3kph = float(data_to.get("IPPk3ph", 0) or 0)
     busfrom_prefault = float(data_from.get("PreFaultNom", 100) or 100)
     busto_prefault = float(data_to.get("PreFaultNom", 100) or 100)
     
-    # --- LOGIQUE SPECIFIQUE PAR TYPE ---
     data_settings = {"type": plan.type}
     formulas_section = {}
     
     # >>>> LOGIQUE TRANSFORMATEUR <<<<
     if plan.type.upper() == "TRANSFORMER":
         
-        # 1. Identification Transfo
         tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
         tx_data = global_tx_map.get(tx_id, {})
         
         mva_tx = float(tx_data.get("MVA", 0))
         maxmva_tx = float(tx_data.get("MaxMVA", 0))
-        min_tap = float(tx_data.get("MinTap", 0))
+        min_tap = float(tx_data.get("MinTap", 0)) # ex: -15 (pour -15%)
         step_tap = float(tx_data.get("StepTap", 0))
         
-        # 2. Calcul Tension Tap
+        # --- CORRECTION FORMULE ---
+        # Si MinTap est un %, on l'utilise directement pour la chute de tension.
+        # kV_tap = kV_nom * (1 - |MinTap|/100)
         try:
-            facteur_chute = (abs(min_tap) * abs(step_tap)) / 100.0 if step_tap else 0
-            if facteur_chute > 0.3: facteur_chute = 0
-            kvnom_busto_tap1 = kvnom_busfrom * (1 - facteur_chute) 
+            percent_drop = abs(min_tap) / 100.0
+            if percent_drop > 0.3: percent_drop = 0 # Sécurité
+            kvnom_busto_tap1 = kvnom_busfrom * (1 - percent_drop) 
         except: kvnom_busto_tap1 = 0
         
-        # 3. Calcul Courants
         in_from = calc_In(mva_tx, kvnom_busfrom)
         in_to = calc_In(mva_tx, kvnom_busto)
+        # Courant au primaire avec tension réduite (worst case)
+        # Note: Si la tension baisse, le courant augmente pour P=cste
         in_from_tap = calc_In(mva_tx, kvnom_busto_tap1) 
         
-        # 4. Formules Isc pondéré
         try:
             r_v = kvnom_busto / kvnom_busfrom if kvnom_busfrom else 0
             f_ipp_from = (busfrom_ipp3kph * r_v) * (busfrom_prefault / 100.0)
@@ -139,7 +136,6 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, gl
             f_ipp_from = 0
             f_ipp_to = 0
 
-        # Remplissage DATA_SETTINGS (Transformers)
         data_settings.update({
             "mva_tx": mva_tx,
             "maxmva_tx": maxmva_tx,
@@ -158,7 +154,6 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, gl
             "inrush_tx": {"inrush_50ms": "TBD", "inrush_900ms": "TBD"}
         })
         
-        # Remplissage FORMULES (Transformers)
         std_51 = settings.std_51
         formulas_section["F_I1_overloads"] = {
             "Fdata_si2s": f"In_tx_busfrom={round(in_from,2)}A",
@@ -167,22 +162,19 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, gl
             "Fremark": "Protection surcharge"
         }
 
-    # >>>> LOGIQUE AUTRES (INCOMER, COUPLING) <<<<
     else:
-        # Pour l'instant, on met juste les bases pour éviter les crashs
+        # Autres types (INCOMER, COUPLING)
         data_settings.update({
-            "status": "WAITING_FOR_SPECS",
+            "status": "BASIC_INFO",
             "kVnom_busfrom": kvnom_busfrom,
             "kVnom_busto": kvnom_busto,
             "BusFrom_IPP3kph": busfrom_ipp3kph,
             "Busto_IPP3kph": busto_ipp3kph,
-            # Tu pourras ajouter ici les champs spécifiques plus tard
         })
-        formulas_section["F_Global"] = "Logic to be defined for this type"
+        formulas_section["F_Global"] = "TBD"
 
     # --- RESULTAT ---
     
-    # Config display
     std_51_cfg = settings.std_51
     config_section = {
         "settings": {
@@ -218,8 +210,6 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, gl
         "comments": comments
     }
 
-# --- BATCH & EXCEL (Inchangés mais réinclus pour cohérence) ---
-
 def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
     files = session_manager.get_files(token)
     global_tx_map = build_global_transformer_map(files)
@@ -233,11 +223,8 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
         for plan in file_config.plans:
             try:
                 res = calculate(plan, file_config.settings, dfs, global_tx_map)
-                
-                # Filtre Scénario Inactif
                 ds = res.get("data_settings", {})
                 if res["status"] == "error_topology": continue
-                # Si le bus n'a pas de tension, on ignore
                 if ds.get("kVnom_busfrom", 0) == 0: continue 
 
                 res["plan_id"] = plan.id
@@ -256,7 +243,6 @@ def generate_excel(results: List[dict]) -> bytes:
             "Plan ID": res.get("plan_id"),
             "Status": res.get("status"),
         }
-        # Data Settings flattening
         ds = res.get("data_settings", {})
         for k, v in ds.items():
             if not isinstance(v, dict): row[f"DS_{k}"] = v
