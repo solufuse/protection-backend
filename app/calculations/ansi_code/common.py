@@ -6,8 +6,6 @@ from typing import Dict, Any, Optional
 from app.schemas.protection import ProtectionPlan, ProjectConfig
 from app.calculations import db_converter
 
-# --- HELPER FUNCTIONS ---
-
 def is_supported_protection(fname: str) -> bool:
     e = fname.lower()
     return e.endswith('.si2s') or e.endswith('.mdb')
@@ -45,13 +43,7 @@ def build_global_transformer_map(files: Dict[str, bytes]) -> Dict[str, Dict]:
                     tid = str(row.get("ID", "")).strip()
                     if not tid: continue
                     if tid not in global_map:
-                        global_map[tid] = {
-                            "MVA": 0.0, 
-                            "MaxMVA": 0.0, 
-                            "MinTap": 0.0, 
-                            "StepTap": 0.0,
-                            "PrimkV": 0.0
-                        }
+                        global_map[tid] = {"MVA": 0.0, "MaxMVA": 0.0, "MinTap": 0.0, "StepTap": 0.0, "PrimkV": 0.0}
                     val_mva = float(row.get("MVA", 0) or 0)
                     if val_mva > global_map[tid]["MVA"]: global_map[tid]["MVA"] = val_mva
                     val_max = float(row.get("MaxMVA", 0) or 0)
@@ -82,19 +74,14 @@ def parse_ct_primary(ct_string: str) -> float:
     if match: return float(match.group(1))
     return 0.0
 
-# --- MAIN DATA BUILDER ---
-
 def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> Dict[str, Any]:
     bus_amont = plan.bus_from
     bus_aval = plan.bus_to
-    
-    # 1. Raw Data Extraction
     data_from = find_bus_data(dfs_dict, bus_amont) or {}
     data_to = find_bus_data(dfs_dict, bus_aval) or {}
     
     kvnom_busfrom = float(data_from.get("kVnom", 0) or 0)
     kvnom_busto = float(data_to.get("kVnom", 0) or 0)
-    
     from_ikLL = float(data_from.get("IkLL", 0) or 0) 
     from_ikLG = float(data_from.get("IkLG", 0) or 0) 
     from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
@@ -102,16 +89,11 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
 
     data_settings = {
-        "type": plan.type,
-        "Bus_Prim": bus_amont,
-        "Bus_Sec": bus_aval,
-        "kVnom_busfrom": kvnom_busfrom,
-        "kVnom_busto": kvnom_busto,
-        "raw_data_from": data_from, 
-        "raw_data_to": data_to      
+        "type": plan.type, "Bus_Prim": bus_amont, "Bus_Sec": bus_aval,
+        "kVnom_busfrom": kvnom_busfrom, "kVnom_busto": kvnom_busto,
+        "raw_data_from": data_from, "raw_data_to": data_to      
     }
     
-    # A. TRANSFORMER
     if plan.type.upper() == "TRANSFORMER":
         tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
         tx_data_etap = global_tx_map.get(tx_id, {})
@@ -119,7 +101,6 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         maxmva_tx = float(tx_data_etap.get("MaxMVA", 0))
         min_tap = float(tx_data_etap.get("MinTap", 0)) 
         step_tap = float(tx_data_etap.get("StepTap", 0))
-        
         tx_user_config = next((t for t in full_config.transformers if t.name == tx_id), None)
         ratio_iencl = tx_user_config.ratio_iencl if tx_user_config else 8.0
         tau_ms = tx_user_config.tau_ms if tx_user_config else 100.0
@@ -135,61 +116,30 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         in_prim = calc_In(mva_tx, kvnom_busfrom) 
         in_sec = calc_In(mva_tx, kvnom_busto)    
         in_prim_tap = calc_In(mva_tx, kvnom_busfrom_tap_min) 
-        
         inrush_val_50ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.05)
         inrush_val_900ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.9)
-        
         ratio_u = kvnom_busto / kvnom_busfrom if kvnom_busfrom else 0
         ikLL_sec_ref_prim = to_ikLL * ratio_u
         ik3ph_sec_ref_prim = to_ik3ph * ratio_u
 
         data_settings.update({
-            "tx_name": tx_id,
-            "mva_tx [MVA]": mva_tx,
-            "maxmva_tx [MaxMVA]": maxmva_tx,
-            "Min%Tap_val [Min%Tap]": min_tap,
-            "Inrush_Ratio": ratio_iencl,
-            "Inrush_Tau_ms": tau_ms,
-            "In_prim_Un": round(in_prim, 2),        
-            "In_prim_TapMin": round(in_prim_tap, 2),
-            "In_sec_Un": round(in_sec, 2),          
-            f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL,       
-            f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,      
-            f"Ik2min_sec_raw [IkLL] [{bus_aval}]": to_ikLL,
-            f"Ik3max_sec_raw [Ik3ph] [{bus_aval}]": to_ik3ph,
-            "Ik2min_sec_ref": round(ikLL_sec_ref_prim, 3), 
-            "Ik2min_sec_ref_Formula": f"{round(to_ikLL,2)} * ({kvnom_busto}/{kvnom_busfrom})",
-            "Ik3max_sec_ref": round(ik3ph_sec_ref_prim, 3),
-            "Ik3max_sec_ref_Formula": f"{round(to_ik3ph,2)} * ({kvnom_busto}/{kvnom_busfrom})",
-            "inrush_50ms": round(inrush_val_50ms, 2),
-            "inrush_50ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.05 / {tau_ms/1000})",
-            "inrush_900ms": round(inrush_val_900ms, 2),
-            "inrush_900ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.9 / {tau_ms/1000})"
+            "tx_name": tx_id, "mva_tx [MVA]": mva_tx, "maxmva_tx [MaxMVA]": maxmva_tx,
+            "Min%Tap_val [Min%Tap]": min_tap, "Inrush_Ratio": ratio_iencl, "Inrush_Tau_ms": tau_ms,
+            "In_prim_Un": round(in_prim, 2), "In_prim_TapMin": round(in_prim_tap, 2), "In_sec_Un": round(in_sec, 2),
+            f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL, f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,
+            f"Ik2min_sec_raw [IkLL] [{bus_aval}]": to_ikLL, f"Ik3max_sec_raw [Ik3ph] [{bus_aval}]": to_ik3ph,
+            "Ik2min_sec_ref": round(ikLL_sec_ref_prim, 3), "Ik2min_sec_ref_Formula": f"{round(to_ikLL,2)} * ({kvnom_busto}/{kvnom_busfrom})",
+            "Ik3max_sec_ref": round(ik3ph_sec_ref_prim, 3), "Ik3max_sec_ref_Formula": f"{round(to_ik3ph,2)} * ({kvnom_busto}/{kvnom_busfrom})",
+            "inrush_50ms": round(inrush_val_50ms, 2), "inrush_50ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.05 / {tau_ms/1000})",
+            "inrush_900ms": round(inrush_val_900ms, 2), "inrush_900ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.9 / {tau_ms/1000})"
         })
-
-    # B. INCOMER (Summing HV Transfos + Link Logic)
     else:
         ct_in = parse_ct_primary(plan.ct_primary)
-        
-        # 1. Fetch Link Data
         link_id = plan.related_source
         link_data = next((l for l in full_config.links_data if l.id == link_id), None)
-        
-        link_info = {}
-        if link_data:
-            link_info = {
-                "Link_ID": link_data.id,
-                "Lenght_link": f"{link_data.length_km} km",
-                "Impedances_link": {"Zd": link_data.impedance_zd, "Z0": link_data.impedance_z0}
-            }
-        else:
-            link_info = {
-                "Link_ID": "Not Found",
-                "Lenght_link": "N/A",
-                "Impedances_link": "N/A"
-            }
+        link_info = {"Link_ID": link_data.id, "Lenght_link": f"{link_data.length_km} km", 
+                     "Impedances_link": {"Zd": link_data.impedance_zd, "Z0": link_data.impedance_z0}} if link_data else {"Link_ID": "Not Found"}
 
-        # 2. Summing HV Transformers
         total_in_prim = 0.0
         total_inrush_50 = 0.0
         total_inrush_80 = 0.0
@@ -204,18 +154,11 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
                 tau = tx_conf.tau_ms if tx_conf else 100.0
                 inrush_50 = calc_inrush_rms_decay(i_n_tx, ratio, tau, 0.05)
                 inrush_80 = calc_inrush_rms_decay(i_n_tx, ratio, tau, 0.08)
-                
                 total_in_prim += i_n_tx
                 total_inrush_50 += inrush_50
                 total_inrush_80 += inrush_80
-                
-                data_settings[f"data_{tid}"] = {
-                    "In_prim": round(i_n_tx, 2),
-                    "MVA": mva,
-                    "Inrush_Ratio": ratio,
-                    "inrush_50ms": round(inrush_50, 2),
-                    "inrush_80ms": round(inrush_80, 2)
-                }
+                data_settings[f"data_{tid}"] = {"In_prim": round(i_n_tx, 2), "MVA": mva, "Inrush_Ratio": ratio, 
+                                                "inrush_50ms": round(inrush_50, 2), "inrush_80ms": round(inrush_80, 2)}
         
         if total_in_prim == 0:
             total_in_prim = ct_in
@@ -224,21 +167,10 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         
         data_settings.update({
             "status": "Computed (Sum of HV Transformers + Link)",
-            "data_total": {
-                "Sum_In_Transfos_HV": round(total_in_prim, 2),
-                "inrush_50ms_Total": round(total_inrush_50, 2),
-                "inrush_80ms_Total": round(total_inrush_80, 2)
-            },
-            "In_prim_Un": round(total_in_prim, 2),
-            "inrush_50ms": round(total_inrush_50, 2),
-            
-            # Link info inserted dynamically
+            "data_total": {"Sum_In_Transfos_HV": round(total_in_prim, 2), "inrush_50ms_Total": round(total_inrush_50, 2), "inrush_80ms_Total": round(total_inrush_80, 2)},
+            "In_prim_Un": round(total_in_prim, 2), "inrush_50ms": round(total_inrush_50, 2),
             **link_info,
-            
-            f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL,
-            f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,
-            "Ik2min_sec_ref": from_ikLL,
-            "Ik3max_sec_ref": from_ik3ph
+            f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL, f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,
+            "Ik2min_sec_ref": from_ikLL, "Ik3max_sec_ref": from_ik3ph
         })
-        
     return data_settings
