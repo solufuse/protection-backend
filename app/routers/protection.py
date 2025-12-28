@@ -6,6 +6,7 @@ from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
+# Import dynamique des modules ANSI
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES, ansi_51
 import json
 import pandas as pd
@@ -20,6 +21,7 @@ def is_supported_protection(fname: str) -> bool:
     return e.endswith('.si2s') or e.endswith('.mdb')
 
 def get_merged_dataframes_for_calc(token: str):
+    """Legacy helper for generic run"""
     files = session_manager.get_files(token)
     if not files: return {}
     merged_dfs = {}
@@ -59,7 +61,7 @@ def get_config_from_session(token: str) -> ProjectConfig:
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid Config JSON: {e}")
 
-# --- ROUTES ---
+# --- GENERIC RUN ROUTES (ANSI 50/51/etc all together) ---
 
 @router.post("/run")
 async def run_via_session(token: str = Depends(get_current_token)):
@@ -79,12 +81,6 @@ async def run_via_session(token: str = Depends(get_current_token)):
                     plan_result["ansi_results"][func_code] = {"error": str(e)}
         global_results.append(plan_result)
     return {"status": "success", "results": global_results}
-
-@router.post("/run-json")
-async def run_via_json(config: ProjectConfig, token: str = Depends(get_current_token)):
-    dfs_dict = get_merged_dataframes_for_calc(token)
-    config_updated = topology_manager.resolve_all(config, dfs_dict)
-    return {"status": "success", "message": "Generic run logic executed"}
 
 @router.get("/data-explorer")
 def explore_data(
@@ -107,44 +103,41 @@ def explore_data(
             if file_results: results[fname] = file_results
     return {"data": results}
 
-# --- ANSI 51 ROUTES ---
+# --- ANSI 51 SPECIFIC ROUTES (BATCH & EXCEL) ---
 
 @router.post("/ansi_51/run")
 async def run_ansi_51_only(
-    include_data: bool = Query(False, description="Set to True to force full data output (Warning: large JSON)"),
+    include_data: bool = Query(False, description="Set to True to see raw data_si2s dump"),
     token: str = Depends(get_current_token)
 ):
     """
-    Exécute ANSI 51. 
-    Par défaut, masque 'data_si2s' pour alléger la réponse.
-    Utiliser ?include_data=true pour tout voir.
+    Exécute uniquement le module ANSI 51 sur tous les fichiers.
+    Retourne le JSON avec data_settings et les seuils calculés.
     """
     config = get_config_from_session(token)
     
+    # Appel du moteur de calcul (ansi_51 qui appelle common)
     full_results = ansi_51.run_batch_logic(config, token)
     
+    # Filtrage pour l'affichage JSON (éviter de crasher le navigateur)
     if include_data:
-        # On renvoie TOUT
-        return {
-            "status": "success", 
-            "total_scenarios": len(full_results), 
-            "info": "Full data included.",
-            "results": full_results
-        }
-    
-    # Sinon, version allégée
-    light_results = []
-    for r in full_results:
-        r_copy = r.copy()
-        if "data_si2s" in r_copy:
-            r_copy["data_si2s"] = "Hidden in preview (use ?include_data=true or /export)"
-        light_results.append(r_copy)
+        final_results = full_results
+        msg = "Full data included."
+    else:
+        final_results = []
+        for r in full_results:
+            r_copy = r.copy()
+            # On masque le dump brut SQL (data_si2s) mais on garde data_settings
+            if "data_si2s" in r_copy:
+                r_copy["data_si2s"] = "Hidden (use include_data=true to see raw DB rows)"
+            final_results.append(r_copy)
+        msg = "Raw data hidden. Use include_data=true to see full DB rows."
 
     return {
         "status": "success", 
-        "total_scenarios": len(light_results), 
-        "info": "Results filtered. Use include_data=true to see full object.",
-        "results": light_results
+        "total_scenarios": len(final_results), 
+        "info": msg,
+        "results": final_results
     }
 
 @router.get("/ansi_51/export")
@@ -152,6 +145,9 @@ async def export_ansi_51(
     format: str = Query("xlsx", pattern="^(xlsx|json)$"),
     token: str = Depends(get_current_token)
 ):
+    """
+    Télécharge le rapport complet ANSI 51 (avec seuils et data settings).
+    """
     config = get_config_from_session(token)
     results = ansi_51.run_batch_logic(config, token)
     
@@ -161,6 +157,7 @@ async def export_ansi_51(
             headers={"Content-Disposition": "attachment; filename=ansi_51_full.json"}
         )
     
+    # Génération Excel
     excel_bytes = ansi_51.generate_excel(results)
     
     return StreamingResponse(
