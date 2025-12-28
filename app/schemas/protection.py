@@ -1,47 +1,45 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional, Literal, Dict, Any
 
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+
+# --- GLOBAL SETTINGS (ANSI STD) ---
 class Std51Settings(BaseModel):
-    coeff_stab_max: float = Field(1.2)
-    coeff_backup_min: float = Field(0.8)
-    coeff_sensibilite: float = Field(0.8)
-    coeff_inrush_margin: float = Field(1.15)
-    selectivity_adder: float = Field(0.0)
+    coeff_stab_max: float = 1.2
+    coeff_backup_min: float = 0.8
+    coeff_sensibilite: float = 0.8
+    coeff_inrush_margin: float = 1.15
+    selectivity_adder: float = 0.3
     backup_strategy: str = "REMOTE_FLOOR"
-
-class SelectivitySettings(BaseModel):
-    margin_amperemetric: float = Field(300.0)
-    coeff_amperemetric: float = Field(1.20)
 
 class GlobalSettings(BaseModel):
     std_51: Std51Settings = Std51Settings()
-    selectivity: SelectivitySettings = SelectivitySettings()
 
+# --- COMPONENTS ---
 class TransformerConfig(BaseModel):
     name: str
-    sn_kva: float
-    u_kv: float
-    ratio_iencl: float
-    tau_ms: float
+    desc: Optional[str] = None
+    ratio_iencl: float = 8.0
+    tau_ms: float = 100.0
 
+class LinkData(BaseModel):
+    id: str
+    length_km: float = 0.0
+    impedance_zd: str = "0+j0"
+    impedance_z0: str = "0+j0"
+
+# --- PLAN ---
 class ProtectionPlan(BaseModel):
     id: str
-    title: Optional[str] = None
-    type: Literal['INCOMER', 'TRANSFORMER', 'COUPLING', 'FEEDER']
-    ct_primary: str
-    relay_model: str = "TBD"
-    related_source: Optional[str] = None 
-    active_functions: List[str] = ["51"]
-    bus_from: Optional[str] = None
+    type: str  # TRANSFORMER, INCOMER, FEEDER...
+    bus_from: str
     bus_to: Optional[str] = None
-    
-    # TRACABILITÉ
-    topology_origin: str = Field("unknown", description="config_user ou script_topo")
-    debug_info: Optional[str] = None
-    meta_data: Optional[Dict[str, Any]] = None
+    ct_primary: str = "CT 100/1 A"
+    related_source: Optional[str] = None  # Sert à lier un Transfo (TX1) ou un Link (Liaison_RTE)
+    active_functions: List[str] = []
 
+# --- ROOT CONFIG ---
 class ProjectConfig(BaseModel):
-    project_name: str = "Projet Solufuse"
     settings: GlobalSettings = GlobalSettings()
     transformers: List[TransformerConfig] = []
+    links_data: List[LinkData] = []  # <--- C'EST CETTE LIGNE QUI MANQUAIT OU N'ETAIT PAS PRISE EN COMPTE
     plans: List[ProtectionPlan] = []
