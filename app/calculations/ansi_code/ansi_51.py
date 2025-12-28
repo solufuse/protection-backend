@@ -1,6 +1,16 @@
 
-from app.schemas.protection import ProtectionPlan, GlobalSettings
+from app.schemas.protection import ProtectionPlan, GlobalSettings, ProjectConfig
+from app.services import session_manager
+from app.calculations import db_converter, topology_manager
 import pandas as pd
+import io
+import copy
+from typing import List
+
+# --- HELPER INTERNE ---
+def _is_supported_protection(fname: str) -> bool:
+    e = fname.lower()
+    return e.endswith('.si2s') or e.endswith('.mdb')
 
 def find_bus_data(dfs_dict: dict, bus_name: str, table_names: list = ["SCIECLGSum1", "SC_SUM_1"]):
     """
@@ -12,7 +22,6 @@ def find_bus_data(dfs_dict: dict, bus_name: str, table_names: list = ["SCIECLGSu
     target_df = None
     found_table = None
     
-    # 1. Identification de la table
     for name in table_names:
         for key in dfs_dict.keys():
             if key.lower() == name.lower():
@@ -25,19 +34,16 @@ def find_bus_data(dfs_dict: dict, bus_name: str, table_names: list = ["SCIECLGSu
     if target_df is None:
         return {"error": "Table SCIECLGSum1 introuvable"}
 
-    # 2. Recherche de la ligne
     try:
         col_bus = next((c for c in target_df.columns if c.lower() == 'faultedbus'), None)
         if not col_bus:
             return {"error": f"Colonne 'FaultedBus' absente de {found_table}"}
             
-        # Filtrage insensible à la casse et aux espaces
         row = target_df[target_df[col_bus].astype(str).str.strip().str.upper() == str(bus_name).strip().upper()]
         
         if row.empty:
-            return None # Bus non trouvé (peut-être pas de faute simulée sur ce bus)
+            return None
             
-        # Conversion en dictionnaire natif (gestion des NaN pour le JSON)
         data = row.iloc[0].where(pd.notnull(row.iloc[0]), None).to_dict()
         return data
 
@@ -46,10 +52,8 @@ def find_bus_data(dfs_dict: dict, bus_name: str, table_names: list = ["SCIECLGSu
 
 def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) -> dict:
     """
-    Logique ANSI 51 avec structure JSON étendue.
+    Logique unitaire ANSI 51 (pour UN plan et UN jeu de données).
     """
-    
-    # --- 1. TOPOLOGIE ---
     bus_amont = plan.bus_from
     bus_aval = plan.bus_to
     
@@ -59,7 +63,6 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) ->
         "bus_to": bus_aval
     }
 
-    # --- 2. DATA SI2S (Fetching) ---
     data_from = find_bus_data(dfs_dict, bus_amont)
     data_to = find_bus_data(dfs_dict, bus_aval)
     
@@ -70,17 +73,13 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) ->
         "bus_to_data": data_to if data_to else "N/A"
     }
 
-    # --- 3. CONFIGURATION ---
-    # On récupère les facteurs définis dans config.json pour les afficher
-    # On gère le cas où std_51 serait incomplet via des valeurs par défaut si besoin
     std_51_cfg = settings.std_51
     
     config_section = {
         "settings": {
             "std_51": {
-                "factor_I1": std_51_cfg.coeff_stab_max, # Mapping temporaire, à ajuster selon ton modèle Pydantic
-                "factor_I2": std_51_cfg.coeff_backup_min, # Idem
-                # Si ton modèle GlobalSettings a des champs dynamiques, on peut les lister ici
+                "factor_I1": std_51_cfg.coeff_stab_max,
+                "factor_I2": std_51_cfg.coeff_backup_min,
                 "details": std_51_cfg.dict()
             }
         },
@@ -88,8 +87,6 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) ->
         "ct_primary": plan.ct_primary
     }
 
-    # --- 4. FORMULES (Squelette) ---
-    # C'est ici qu'on implémentera ta logique mathématique spécifique plus tard
     formulas_section = {
         "F_I1_overloads": {
             "Fdata_si2s": "TBD (ex: Inom Transfo, Ampacity Câble)",
@@ -97,28 +94,9 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) ->
             "Ftime": "Long Time / Inverse Curve",
             "Fremark": "Protection surcharge thermique"
         },
-        "F_I2_phase_short-circuit": {
-            "Fdata_si2s": "TBD (ex: Isc Min Bus Aval)",
-            "Fcalculation": "TBD",
-            "Ftime": "Short Time / Definite Time",
-            "Fremark": "Protection court-circuit sélective"
-        },
-        "F_I3_phase_short-circuit": {
-            "Fdata_si2s": "TBD",
-            "Fcalculation": "TBD",
-            "Ftime": "Instantaneous",
-            "Fremark": "Protection haut débit (si applicable)"
-        },
-        "F_I4_phase_short-circuit": {
-            "Fdata_si2s": "TBD",
-            "Fcalculation": "TBD",
-            "Ftime": "TBD",
-            "Fremark": "Etage supplémentaire (si applicable)"
-        }
+        # ... (Autres formules placeholders)
     }
 
-    # --- 5. RESULTATS FINAUX ---
-    # Validation basique
     status = "computed"
     comments = []
     
@@ -130,10 +108,8 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) ->
         comments.append(f"⚠️ {data_to['error']}")
     else:
         comments.append(f"✅ Topologie OK : {bus_amont} -> {bus_aval}")
-        if data_to:
-            comments.append("✅ Données Isc Bus Aval récupérées")
-        else:
-            comments.append("⚠️ Pas de données Isc pour le Bus Aval")
+        if data_to: comments.append("✅ Données Isc Bus Aval récupérées")
+        else: comments.append("⚠️ Pas de données Isc pour le Bus Aval")
 
     return {
         "ansi_code": "51",
@@ -142,9 +118,93 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) ->
         "data_si2s": data_si2s_section,
         "config": config_section,
         "formulas": formulas_section,
-        "calculated_thresholds": {
-            "pickup_amps": 0.0, # Placeholder
-            "time_dial": 0.0    # Placeholder
-        },
+        "calculated_thresholds": {"pickup_amps": 0.0, "time_dial": 0.0},
         "comments": comments
     }
+
+# --- LOGIQUE BATCH (ORCHESTRATEUR) ---
+
+def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
+    """
+    Exécute le calcul ANSI 51 pour tous les plans sur tous les fichiers SI2S trouvés.
+    """
+    files = session_manager.get_files(token)
+    results = []
+    
+    for filename, content in files.items():
+        if not _is_supported_protection(filename): 
+            continue
+            
+        dfs = db_converter.extract_data_from_db(content)
+        if not dfs: continue
+        
+        file_config = copy.deepcopy(config)
+        topology_manager.resolve_all(file_config, dfs)
+        
+        for plan in file_config.plans:
+            try:
+                # Appel de la fonction calculate définie plus haut
+                res = calculate(plan, file_config.settings, dfs)
+                
+                res["plan_id"] = plan.id
+                res["plan_type"] = plan.type
+                res["source_file"] = filename
+                results.append(res)
+            except Exception as e:
+                results.append({
+                    "plan_id": plan.id,
+                    "plan_type": plan.type,
+                    "source_file": filename,
+                    "ansi_code": "51",
+                    "status": "error",
+                    "comments": [f"Error in {filename}: {str(e)}"]
+                })
+    return results
+
+# --- GENERATEUR EXCEL ---
+
+def generate_excel(results: List[dict]) -> bytes:
+    flat_rows = []
+    for res in results:
+        row = {
+            "Source File": res.get("source_file"),
+            "Plan ID": res.get("plan_id"),
+            "Type": res.get("plan_type"),
+            "Status": res.get("status"),
+            "Bus From": res.get("topology_used", {}).get("bus_from"),
+            "Bus To": res.get("topology_used", {}).get("bus_to"),
+        }
+        thresh = res.get("calculated_thresholds", {})
+        row["Pickup (A)"] = thresh.get("pickup_amps")
+        row["Time Dial"] = thresh.get("time_dial")
+        row["Comments"] = " | ".join(res.get("comments", []))
+
+        data_section = res.get("data_si2s", {})
+        
+        from_data = data_section.get("bus_from_data")
+        if isinstance(from_data, dict):
+            for k, v in from_data.items(): row[f"FROM_{k}"] = v
+        
+        to_data = data_section.get("bus_to_data")
+        if isinstance(to_data, dict):
+            for k, v in to_data.items(): row[f"TO_{k}"] = v
+
+        flat_rows.append(row)
+
+    df = pd.DataFrame(flat_rows)
+    cols = list(df.columns)
+    prio_cols = ["Source File", "Plan ID", "Type", "Status", "Bus From", "Bus To", "Pickup (A)"]
+    final_cols = [c for c in prio_cols if c in cols] + [c for c in cols if c not in prio_cols]
+    df = df[final_cols]
+    
+    if "Plan ID" in df.columns and "Source File" in df.columns:
+        df = df.sort_values(by=["Plan ID", "Source File"])
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name="Full Data Results", index=False)
+        ws = writer.sheets["Full Data Results"]
+        for col in ws.columns:
+            try: ws.column_dimensions[col[0].column_letter].width = 18
+            except: pass
+    return output.getvalue()
