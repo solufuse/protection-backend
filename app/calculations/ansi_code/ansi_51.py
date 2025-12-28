@@ -89,12 +89,11 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) ->
 
     formulas_section = {
         "F_I1_overloads": {
-            "Fdata_si2s": "TBD (ex: Inom Transfo, Ampacity Câble)",
-            "Fcalculation": f"TBD (ex: {std_51_cfg.coeff_stab_max} * Inom)",
-            "Ftime": "Long Time / Inverse Curve",
-            "Fremark": "Protection surcharge thermique"
-        },
-        # ... (Autres formules placeholders)
+            "Fdata_si2s": "TBD",
+            "Fcalculation": "TBD",
+            "Ftime": "Long Time",
+            "Fremark": "Protection surcharge"
+        }
     }
 
     status = "computed"
@@ -126,7 +125,8 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) ->
 
 def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
     """
-    Exécute le calcul ANSI 51 pour tous les plans sur tous les fichiers SI2S trouvés.
+    Exécute le calcul ANSI 51 pour tous les plans sur tous les fichiers SI2S.
+    FILTRE AUTOMATIQUEMENT les scénarios inactifs (pas de topologie ou pas de tension).
     """
     files = session_manager.get_files(token)
     results = []
@@ -143,14 +143,31 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
         
         for plan in file_config.plans:
             try:
-                # Appel de la fonction calculate définie plus haut
+                # 1. Calculer
                 res = calculate(plan, file_config.settings, dfs)
                 
+                # 2. FILTRER : Si l'équipement n'est pas actif dans ce scénario, on ne l'ajoute pas.
+                
+                # Critère A: Erreur de topologie (L'équipement n'existe pas ou est déconnecté dans ce cas)
+                if res.get("status") == "error_topology":
+                    continue
+                
+                # Critère B: Pas de données électriques (Pas de Isc calculé = Équipement hors tension)
+                data_section = res.get("data_si2s", {})
+                bus_to_data = data_section.get("bus_to_data")
+                
+                # Si bus_to_data est "N/A" ou une erreur, on saute
+                if bus_to_data == "N/A" or (isinstance(bus_to_data, dict) and "error" in bus_to_data):
+                    continue
+
+                # Si on arrive ici, c'est que l'équipement est actif et calculable
                 res["plan_id"] = plan.id
                 res["plan_type"] = plan.type
                 res["source_file"] = filename
                 results.append(res)
+                
             except Exception as e:
+                # En cas de crash code, on garde la trace pour débugger
                 results.append({
                     "plan_id": plan.id,
                     "plan_type": plan.type,
@@ -164,46 +181,51 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
 # --- GENERATEUR EXCEL ---
 
 def generate_excel(results: List[dict]) -> bytes:
-    flat_rows = []
-    for res in results:
-        row = {
-            "Source File": res.get("source_file"),
-            "Plan ID": res.get("plan_id"),
-            "Type": res.get("plan_type"),
-            "Status": res.get("status"),
-            "Bus From": res.get("topology_used", {}).get("bus_from"),
-            "Bus To": res.get("topology_used", {}).get("bus_to"),
-        }
-        thresh = res.get("calculated_thresholds", {})
-        row["Pickup (A)"] = thresh.get("pickup_amps")
-        row["Time Dial"] = thresh.get("time_dial")
-        row["Comments"] = " | ".join(res.get("comments", []))
+    if not results:
+        # Retourne un Excel vide avec juste les en-têtes si aucun résultat
+        df = pd.DataFrame(columns=["Source File", "Plan ID", "Status", "Comments"])
+    else:
+        flat_rows = []
+        for res in results:
+            row = {
+                "Source File": res.get("source_file"),
+                "Plan ID": res.get("plan_id"),
+                "Type": res.get("plan_type"),
+                "Status": res.get("status"),
+                "Bus From": res.get("topology_used", {}).get("bus_from"),
+                "Bus To": res.get("topology_used", {}).get("bus_to"),
+            }
+            thresh = res.get("calculated_thresholds", {})
+            row["Pickup (A)"] = thresh.get("pickup_amps")
+            row["Time Dial"] = thresh.get("time_dial")
+            row["Comments"] = " | ".join(res.get("comments", []))
 
-        data_section = res.get("data_si2s", {})
+            data_section = res.get("data_si2s", {})
+            
+            from_data = data_section.get("bus_from_data")
+            if isinstance(from_data, dict):
+                for k, v in from_data.items(): row[f"FROM_{k}"] = v
+            
+            to_data = data_section.get("bus_to_data")
+            if isinstance(to_data, dict):
+                for k, v in to_data.items(): row[f"TO_{k}"] = v
+
+            flat_rows.append(row)
+
+        df = pd.DataFrame(flat_rows)
         
-        from_data = data_section.get("bus_from_data")
-        if isinstance(from_data, dict):
-            for k, v in from_data.items(): row[f"FROM_{k}"] = v
+        cols = list(df.columns)
+        prio_cols = ["Source File", "Plan ID", "Type", "Status", "Bus From", "Bus To", "Pickup (A)"]
+        final_cols = [c for c in prio_cols if c in cols] + [c for c in cols if c not in prio_cols]
+        df = df[final_cols]
         
-        to_data = data_section.get("bus_to_data")
-        if isinstance(to_data, dict):
-            for k, v in to_data.items(): row[f"TO_{k}"] = v
-
-        flat_rows.append(row)
-
-    df = pd.DataFrame(flat_rows)
-    cols = list(df.columns)
-    prio_cols = ["Source File", "Plan ID", "Type", "Status", "Bus From", "Bus To", "Pickup (A)"]
-    final_cols = [c for c in prio_cols if c in cols] + [c for c in cols if c not in prio_cols]
-    df = df[final_cols]
-    
-    if "Plan ID" in df.columns and "Source File" in df.columns:
-        df = df.sort_values(by=["Plan ID", "Source File"])
+        if "Plan ID" in df.columns and "Source File" in df.columns:
+            df = df.sort_values(by=["Plan ID", "Source File"])
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name="Full Data Results", index=False)
-        ws = writer.sheets["Full Data Results"]
+        df.to_excel(writer, sheet_name="Active Scenarios Only", index=False)
+        ws = writer.sheets["Active Scenarios Only"]
         for col in ws.columns:
             try: ws.column_dimensions[col[0].column_letter].width = 18
             except: pass
