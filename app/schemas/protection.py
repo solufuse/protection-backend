@@ -2,7 +2,6 @@
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
-# --- GLOBAL SETTINGS (ANSI STD) ---
 class Std51Settings(BaseModel):
     coeff_stab_max: float = 1.2
     coeff_backup_min: float = 0.8
@@ -14,7 +13,6 @@ class Std51Settings(BaseModel):
 class GlobalSettings(BaseModel):
     std_51: Std51Settings = Std51Settings()
 
-# --- COMPONENTS ---
 class TransformerConfig(BaseModel):
     name: str
     desc: Optional[str] = None
@@ -27,23 +25,23 @@ class LinkData(BaseModel):
     impedance_zd: str = "0+j0"
     impedance_z0: str = "0+j0"
 
-# --- PLAN ---
 class ProtectionPlan(BaseModel):
     id: str
-    type: str  # TRANSFORMER, INCOMER, FEEDER...
-    
-    bus_from: Optional[str] = None 
+    type: str
+    bus_from: Optional[str] = None
     bus_to: Optional[str] = None
-    
     ct_primary: str = "CT 100/1 A"
     related_source: Optional[str] = None
     active_functions: List[str] = []
     
-    # --- INTERNAL FIELDS (Pour topology_manager) ---
+    # Champs internes connus
     topology_origin: Optional[str] = None
-    debug_info: Optional[str] = None          # <--- LE NOUVEAU CHAMP MANQUANT
+    debug_info: Optional[str] = None
 
-# --- ROOT CONFIG ---
+    # LA SOLUTION MAGIQUE : On autorise n'importe quel autre champ !
+    class Config:
+        extra = "allow" 
+
 class ProjectConfig(BaseModel):
     settings: GlobalSettings = GlobalSettings()
     transformers: List[TransformerConfig] = []

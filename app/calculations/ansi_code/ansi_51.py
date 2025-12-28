@@ -7,6 +7,7 @@ import pandas as pd
 import io
 import copy
 from typing import List, Dict, Any
+import traceback
 
 def flatten_dict(d: Dict, parent_key: str = '', sep: str = '_') -> Dict:
     items = []
@@ -56,19 +57,46 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
         if not common.is_supported_protection(filename): continue
         dfs = db_converter.extract_data_from_db(content)
         if not dfs: continue
+        
         file_config = copy.deepcopy(config)
-        topology_manager.resolve_all(file_config, dfs)
+        
+        # PROTECTION CONTRE TOPOLOGY MANAGER
+        try:
+            topology_manager.resolve_all(file_config, dfs)
+        except Exception as e:
+            print(f"Topology Manager Error: {e}")
+            # On continue quand même, avec les infos partielles du JSON
+        
         for plan in file_config.plans:
             try:
                 res = calculate(plan, file_config, dfs, global_tx_map)
                 ds = res.get("data_settings", {})
-                if res["status"] == "error_topology": continue
-                if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: continue 
+                
+                # Check error status
+                if res.get("status", "").startswith("error"):
+                    results.append(res)
+                    continue
+
+                if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: 
+                    # Silent skip or log? Let's log info
+                    res["status"] = "skipped (no kV)"
+                    results.append(res)
+                    continue 
+                
                 res["plan_id"] = plan.id
                 res["plan_type"] = plan.type
                 res["source_file"] = filename
                 results.append(res)
-            except Exception as e: results.append({"plan_id": plan.id, "source_file": filename, "status": "error", "comments": [str(e)]})
+            except Exception as e:
+                # C'EST ICI QU'ON EVITE LE 500
+                err_msg = str(e)
+                traceback.print_exc()
+                results.append({
+                    "plan_id": plan.id, 
+                    "source_file": filename, 
+                    "status": "CRASH", 
+                    "comments": [f"Internal Calculation Error: {err_msg}"]
+                })
     return results
 
 def generate_excel(results: List[dict]) -> bytes:
@@ -82,13 +110,15 @@ def generate_excel(results: List[dict]) -> bytes:
         ds_clean = {k: v for k, v in ds.items() if k not in ["raw_data_from", "raw_data_to"]}
         flat_ds = flatten_dict(ds_clean, parent_key="DS")
         row.update(flat_ds)
+        
+        # Ajout des erreurs dans l'excel si crash
+        if "comments" in res and res["comments"]:
+            row["Error_Logs"] = str(res["comments"])
+
         flat_rows.append(row)
     df = pd.DataFrame(flat_rows)
     if "Plan ID" in df.columns: df = df.sort_values(by=["Plan ID", "Source File"])
-    cols = list(df.columns)
-    priority = ["Source File", "Plan ID", "Type", "Status", "Calc_Pickup_I1", "Calc_Backup_I2"]
-    new_order = [c for c in priority if c in cols] + [c for c in cols if c not in priority]
-    df = df[new_order]
+    
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name="Data Settings", index=False)
