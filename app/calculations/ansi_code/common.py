@@ -29,10 +29,6 @@ def find_bus_data(dfs_dict: dict, bus_name: str) -> dict:
     except: return None
 
 def build_global_transformer_map(files: Dict[str, bytes]) -> Dict[str, Dict]:
-    """
-    Scans all files to identify ALL transformers.
-    We capture MVA, Taps, AND Primary Voltage (PrimkV) to filter HV transformers later.
-    """
     global_map = {}
     for fname, content in files.items():
         if not is_supported_protection(fname): continue
@@ -49,28 +45,22 @@ def build_global_transformer_map(files: Dict[str, bytes]) -> Dict[str, Dict]:
                     tid = str(row.get("ID", "")).strip()
                     if not tid: continue
                     if tid not in global_map:
-                        # Initialisation de la structure pour ce transfo
                         global_map[tid] = {
                             "MVA": 0.0, 
                             "MaxMVA": 0.0, 
                             "MinTap": 0.0, 
                             "StepTap": 0.0,
-                            "PrimkV": 0.0 # <-- Important pour le filtre > 50kV
+                            "PrimkV": 0.0
                         }
-                    
                     val_mva = float(row.get("MVA", 0) or 0)
                     if val_mva > global_map[tid]["MVA"]: global_map[tid]["MVA"] = val_mva
-                    
                     val_max = float(row.get("MaxMVA", 0) or 0)
                     if val_max > global_map[tid]["MaxMVA"]: global_map[tid]["MaxMVA"] = val_max
-                    
-                    val_kv = float(row.get("PrimkV", 0) or 0) # Lecture tension primaire
+                    val_kv = float(row.get("PrimkV", 0) or 0)
                     if val_kv > global_map[tid]["PrimkV"]: global_map[tid]["PrimkV"] = val_kv
-
                     val_min = float(row.get("Min%Tap", 0) or 0)
                     curr_min = global_map[tid]["MinTap"]
                     if abs(val_min) > abs(curr_min): global_map[tid]["MinTap"] = val_min
-                    
                     val_step = float(row.get("Step%Tap", 0) or 0)
                     if val_step != 0 and global_map[tid]["StepTap"] == 0: global_map[tid]["StepTap"] = val_step
                 except: continue
@@ -111,7 +101,6 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
     to_ikLL = float(data_to.get("IkLL", 0) or 0)
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
 
-    # 2. Base Container
     data_settings = {
         "type": plan.type,
         "Bus_Prim": bus_amont,
@@ -122,12 +111,9 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         "raw_data_to": data_to      
     }
     
-    # =========================================
-    # A. TRANSFORMER LOGIC (Protection d'un seul transfo)
-    # =========================================
+    # A. TRANSFORMER
     if plan.type.upper() == "TRANSFORMER":
         tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
-        
         tx_data_etap = global_tx_map.get(tx_id, {})
         mva_tx = float(tx_data_etap.get("MVA", 0))
         maxmva_tx = float(tx_data_etap.get("MaxMVA", 0))
@@ -167,106 +153,90 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
             "In_prim_Un": round(in_prim, 2),        
             "In_prim_TapMin": round(in_prim_tap, 2),
             "In_sec_Un": round(in_sec, 2),          
-            
             f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL,       
             f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,      
             f"Ik2min_sec_raw [IkLL] [{bus_aval}]": to_ikLL,
             f"Ik3max_sec_raw [Ik3ph] [{bus_aval}]": to_ik3ph,
-            
             "Ik2min_sec_ref": round(ikLL_sec_ref_prim, 3), 
             "Ik2min_sec_ref_Formula": f"{round(to_ikLL,2)} * ({kvnom_busto}/{kvnom_busfrom})",
             "Ik3max_sec_ref": round(ik3ph_sec_ref_prim, 3),
             "Ik3max_sec_ref_Formula": f"{round(to_ik3ph,2)} * ({kvnom_busto}/{kvnom_busfrom})",
-            
             "inrush_50ms": round(inrush_val_50ms, 2),
             "inrush_50ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.05 / {tau_ms/1000})",
             "inrush_900ms": round(inrush_val_900ms, 2),
             "inrush_900ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.9 / {tau_ms/1000})"
         })
 
-    # =========================================
-    # B. INCOMER LOGIC (Somme des Transfos > 50kV)
-    # =========================================
+    # B. INCOMER (Summing HV Transfos + Link Logic)
     else:
-        # Données de liaison (Link) récupérées de la config si elles existent
-        # On suppose que settings.general peut contenir ces infos, sinon valeurs par défaut
-        # TODO: A ajouter dans le schéma ProjectConfig plus tard
-        
         ct_in = parse_ct_primary(plan.ct_primary)
         
-        # --- LOGIQUE DE SOMMATION DES TRANSFOS > 50kV ---
+        # 1. Fetch Link Data
+        link_id = plan.related_source
+        link_data = next((l for l in full_config.links_data if l.id == link_id), None)
+        
+        link_info = {}
+        if link_data:
+            link_info = {
+                "Link_ID": link_data.id,
+                "Lenght_link": f"{link_data.length_km} km",
+                "Impedances_link": {"Zd": link_data.impedance_zd, "Z0": link_data.impedance_z0}
+            }
+        else:
+            link_info = {
+                "Link_ID": "Not Found",
+                "Lenght_link": "N/A",
+                "Impedances_link": "N/A"
+            }
+
+        # 2. Summing HV Transformers
         total_in_prim = 0.0
         total_inrush_50 = 0.0
         total_inrush_80 = 0.0
         
-        # Liste pour stocker les détails par transfo (pour le JSON)
-        tx_details_list = []
-        
         for tid, tdata in global_tx_map.items():
             prim_kv = float(tdata.get("PrimkV", 0))
-            
-            # FILTRE: Uniquement les transfos Haute Tension (> 50kV)
             if prim_kv > 50.0:
                 mva = tdata.get("MVA", 0)
-                # Calcul du In pour ce transfo
                 i_n_tx = calc_In(mva, prim_kv)
-                
-                # Récupération config Inrush pour CE transfo
                 tx_conf = next((t for t in full_config.transformers if t.name == tid), None)
-                ratio = tx_conf.ratio_iencl if tx_conf else 8.0 # Valeur defaut 8 In si non configuré
+                ratio = tx_conf.ratio_iencl if tx_conf else 8.0 
                 tau = tx_conf.tau_ms if tx_conf else 100.0
-                
-                # Calculs Inrush individuels
                 inrush_50 = calc_inrush_rms_decay(i_n_tx, ratio, tau, 0.05)
                 inrush_80 = calc_inrush_rms_decay(i_n_tx, ratio, tau, 0.08)
                 
-                # Ajout aux totaux
                 total_in_prim += i_n_tx
                 total_inrush_50 += inrush_50
                 total_inrush_80 += inrush_80
                 
-                # Stockage détails
                 data_settings[f"data_{tid}"] = {
                     "In_prim": round(i_n_tx, 2),
                     "MVA": mva,
-                    "PrimkV": prim_kv,
                     "Inrush_Ratio": ratio,
-                    "Inrush_Tau_ms": tau,
                     "inrush_50ms": round(inrush_50, 2),
-                    "inrush_50ms_Formula": f"({round(i_n_tx,2)} * {ratio} / sqrt(2)) * exp(-0.05 / {tau/1000})",
-                    "inrush_80ms": round(inrush_80, 2),
-                    "inrush_80ms_Formula": f"({round(i_n_tx,2)} * {ratio} / sqrt(2)) * exp(-0.08 / {tau/1000})"
+                    "inrush_80ms": round(inrush_80, 2)
                 }
         
-        # Si aucun transfo > 50kV trouvé, on fallback sur le CT
         if total_in_prim == 0:
             total_in_prim = ct_in
-            # Estimation Inrush standard si pas de transfo identifié
             total_inrush_50 = calc_inrush_rms_decay(ct_in, 6.0, 100.0, 0.05)
             total_inrush_80 = calc_inrush_rms_decay(ct_in, 6.0, 100.0, 0.08)
         
         data_settings.update({
-            "status": "Computed (Sum of HV Transformers)",
-            
-            # --- GLOBAL DATA ---
+            "status": "Computed (Sum of HV Transformers + Link)",
             "data_total": {
                 "Sum_In_Transfos_HV": round(total_in_prim, 2),
                 "inrush_50ms_Total": round(total_inrush_50, 2),
                 "inrush_80ms_Total": round(total_inrush_80, 2)
             },
-            
-            # Valeurs retenues pour le reste du calcul
             "In_prim_Un": round(total_in_prim, 2),
-            "inrush_50ms": round(total_inrush_50, 2), # Le max vu par la protection
+            "inrush_50ms": round(total_inrush_50, 2),
             
-            # --- Link Data (Placeholders for config.json) ---
-            "Lenght_link": "3 km (Check Config)",
-            "Impedances_link": {"Zd": "0.17+j0.53", "Z0": "0.89+j5.53"},
+            # Link info inserted dynamically
+            **link_info,
             
-            # --- DIRECT FAULT READINGS ---
             f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL,
             f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,
-            
             "Ik2min_sec_ref": from_ikLL,
             "Ik3max_sec_ref": from_ik3ph
         })
