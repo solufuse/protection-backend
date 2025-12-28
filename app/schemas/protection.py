@@ -33,14 +33,6 @@ class ProtectionPlan(BaseModel):
     ct_primary: str = "CT 100/1 A"
     related_source: Optional[str] = None
     active_functions: List[str] = []
-    
-    # Champs internes connus
-    topology_origin: Optional[str] = None
-    debug_info: Optional[str] = None
-
-    # LA SOLUTION MAGIQUE : On autorise n'importe quel autre champ !
-    class Config:
-        extra = "allow" 
 
 class ProjectConfig(BaseModel):
     settings: GlobalSettings = GlobalSettings()
