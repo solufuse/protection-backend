@@ -76,7 +76,6 @@ def calc_inrush_rms_decay(i_nom: float, ratio: float, tau_ms: float, time_s: flo
 def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> Dict[str, Any]:
     """
     Generates the 'data_settings' dictionary containing all physical/electrical values.
-    This function is SHARED across all ANSI modules (50, 51, 87, etc.).
     """
     bus_amont = plan.bus_from
     bus_aval = plan.bus_to
@@ -94,16 +93,14 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
     to_ikLL = float(data_to.get("IkLL", 0) or 0)
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
 
-    # 2. Base Container
+    # 2. Base Container (CLEANED)
     data_settings = {
         "type": plan.type,
         "Bus_Prim": bus_amont,
         "Bus_Sec": bus_aval,
         "kVnom_busfrom": kvnom_busfrom,
-        "kVnom_busto": kvnom_busto,
-        # Raw Data (useful for debug)
-        "raw_data_from": data_from,
-        "raw_data_to": data_to
+        "kVnom_busto": kvnom_busto
+        # Removed raw_data dumps to keep output clean
     }
     
     # 3. Transformer Specific Logic
