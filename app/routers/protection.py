@@ -1,16 +1,17 @@
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse, JSONResponse
-from typing import Optional
+from typing import Optional, Dict, Any
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
-# PATCH: Use db_converter (si2s_converter does not exist in this repo)
 from app.calculations import db_converter, topology_manager
+# Import the new ANSI package
+from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
 import json
 import pandas as pd
 import io
 
-# PREFIX UPDATED to /protection
 router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
 
 # --- HELPERS ---
@@ -19,12 +20,15 @@ def is_supported(fname: str) -> bool:
     return e.endswith('.si2s') or e.endswith('.mdb') or e.endswith('.lf1s')
 
 def get_merged_dataframes_for_calc(token: str):
+    """
+    Reads all relevant files from session and merges them into a dictionary of DataFrames.
+    """
     files = session_manager.get_files(token)
     if not files: return {}
     merged_dfs = {}
     for name, content in files.items():
         if is_supported(name):
-            # PATCH: Using db_converter
+            # Extract data using existing db_converter
             dfs = db_converter.extract_data_from_db(content)
             if dfs:
                 for t, df in dfs.items():
@@ -37,14 +41,49 @@ def get_merged_dataframes_for_calc(token: str):
     return final
 
 def _execute_calculation_logic(config: ProjectConfig, token: str):
+    """
+    Orchestrator function:
+    1. Loads data (SI2S).
+    2. Resolves topology.
+    3. Iterates over each Protection Plan.
+    4. Calls the relevant ANSI modules (51, 67, etc.) dynamically.
+    """
     dfs_dict = get_merged_dataframes_for_calc(token)
+    
+    # 1. Topology Resolution
     config_updated = topology_manager.resolve_all(config, dfs_dict)
+    
+    # 2. Calculation Loop per Plan
+    global_results = []
+    
+    for plan in config_updated.plans:
+        plan_result = {
+            "plan_id": plan.id,
+            "ansi_results": {}
+        }
+        
+        # Iterate over active functions requested by the user (e.g., ["51", "67"])
+        for func_code in plan.active_functions:
+            if func_code in AVAILABLE_ANSI_MODULES:
+                module = AVAILABLE_ANSI_MODULES[func_code]
+                
+                # Execute the specific ANSI calculation
+                try:
+                    res = module.calculate(plan, config.settings, dfs_dict)
+                    plan_result["ansi_results"][func_code] = res
+                except Exception as e:
+                    plan_result["ansi_results"][func_code] = {"error": str(e)}
+            else:
+                plan_result["ansi_results"][func_code] = {"status": "not_implemented"}
+                
+        global_results.append(plan_result)
     
     return {
         "status": "success",
-        "engine": "Protection Coordination (PC)",
+        "engine": "Protection Coordination (PC) - Modular ANSI",
         "project": config_updated.project_name,
-        "plans": config_updated.plans
+        "config_summary": config_updated.plans,
+        "calculation_results": global_results
     }
 
 def get_config_from_session(token: str) -> ProjectConfig:
