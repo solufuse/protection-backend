@@ -1,135 +1,150 @@
 
 from app.schemas.protection import ProtectionPlan, GlobalSettings
 import pandas as pd
-import math
 
 def find_bus_data(dfs_dict: dict, bus_name: str, table_names: list = ["SCIECLGSum1", "SC_SUM_1"]):
     """
-    Cherche les données d'un bus spécifique dans les tables de court-circuit fournies.
+    Cherche et retourne la ligne de données pour un bus donné dans les tables de court-circuit.
     """
     if not bus_name:
         return None
 
-    # 1. Trouver la table disponible
     target_df = None
-    found_table_name = None
+    found_table = None
+    
+    # 1. Identification de la table
     for name in table_names:
-        # Recherche insensible à la casse
         for key in dfs_dict.keys():
             if key.lower() == name.lower():
                 target_df = dfs_dict[key]
-                found_table_name = key
+                found_table = key
                 break
         if target_df is not None:
             break
-    
+            
     if target_df is None:
-        return {"error": f"Tables {table_names} introuvables dans le fichier source."}
+        return {"error": "Table SCIECLGSum1 introuvable"}
 
-    # 2. Chercher la ligne du bus (colonne FaultedBus)
-    # On nettoie les espaces et on met en majuscules pour comparer
+    # 2. Recherche de la ligne
     try:
-        # On suppose que la colonne s'appelle 'FaultedBus' (standard ETAP)
         col_bus = next((c for c in target_df.columns if c.lower() == 'faultedbus'), None)
         if not col_bus:
-            return {"error": f"Colonne 'FaultedBus' introuvable dans {found_table_name}"}
-
-        # Filtrage
+            return {"error": f"Colonne 'FaultedBus' absente de {found_table}"}
+            
+        # Filtrage insensible à la casse et aux espaces
         row = target_df[target_df[col_bus].astype(str).str.strip().str.upper() == str(bus_name).strip().upper()]
         
         if row.empty:
-            return None # Bus non trouvé dans l'étude CC
-        
-        # Conversion en dictionnaire (première ligne trouvée)
-        return row.iloc[0].to_dict()
+            return None # Bus non trouvé (peut-être pas de faute simulée sur ce bus)
+            
+        # Conversion en dictionnaire natif (gestion des NaN pour le JSON)
+        data = row.iloc[0].where(pd.notnull(row.iloc[0]), None).to_dict()
+        return data
 
     except Exception as e:
-        return {"error": f"Erreur lors de la lecture: {str(e)}"}
+        return {"error": f"Erreur lecture: {str(e)}"}
 
 def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict) -> dict:
     """
-    ANSI 51 Calculation Logic avec Data Fetching
+    Logique ANSI 51 avec structure JSON étendue.
     """
     
-    results = {
-        "ansi_code": "51",
-        "status": "TBD",
-        "topology_used": {},
-        "data_si2s": {},
-        "config": {},
-        "formulas": {},
-        "calculated_thresholds": {"pickup_amps": 0, "time_dial": 0},
-        "comments": []
-    }
-
     # --- 1. TOPOLOGIE ---
     bus_amont = plan.bus_from
     bus_aval = plan.bus_to
     
-    results["topology_used"] = {
+    topology_info = {
         "source_origin": plan.topology_origin,
         "bus_from": bus_amont,
         "bus_to": bus_aval
     }
 
-    if not bus_aval or not bus_amont:
-        results["status"] = "error_topology"
-        results["comments"].append("❌ Erreur : Bus Amont ou Aval manquant.")
-        return results
-
-    results["comments"].append(f"✅ Topologie OK : {bus_amont} -> {bus_aval}")
-
-    # --- 2. DATA SI2S (EXTRACTION) ---
-    # On va chercher la ligne complète pour le bus amont et le bus aval
+    # --- 2. DATA SI2S (Fetching) ---
     data_from = find_bus_data(dfs_dict, bus_amont)
     data_to = find_bus_data(dfs_dict, bus_aval)
     
-    results["data_si2s"] = {
-        "bus_from_tag": bus_amont,
-        "bus_from_data": data_from if data_from else "Données non trouvées dans SCIECLGSum1",
-        "bus_to_tag": bus_aval,
-        "bus_to_data": data_to if data_to else "Données non trouvées dans SCIECLGSum1"
+    data_si2s_section = {
+        "FaultedBus_bus_from": bus_amont,
+        "bus_from_data": data_from if data_from else "N/A",
+        "FaultedBus_bus_to": bus_aval,
+        "bus_to_data": data_to if data_to else "N/A"
     }
 
-    # --- 3. CONFIG & SETTINGS ---
-    # On injecte les réglages utilisés pour référence
-    results["config"] = {
+    # --- 3. CONFIGURATION ---
+    # On récupère les facteurs définis dans config.json pour les afficher
+    # On gère le cas où std_51 serait incomplet via des valeurs par défaut si besoin
+    std_51_cfg = settings.std_51
+    
+    config_section = {
         "settings": {
-            "std_51": settings.std_51.dict()
+            "std_51": {
+                "factor_I1": std_51_cfg.coeff_stab_max, # Mapping temporaire, à ajuster selon ton modèle Pydantic
+                "factor_I2": std_51_cfg.coeff_backup_min, # Idem
+                # Si ton modèle GlobalSettings a des champs dynamiques, on peut les lister ici
+                "details": std_51_cfg.dict()
+            }
         },
-        "type": plan.type # TRANSFORMER, FEEDER, etc.
+        "type": plan.type,
+        "ct_primary": plan.ct_primary
     }
 
-    # --- 4. FORMULAS (PLACEHOLDERS) ---
-    # Structure demandée pour les calculs futurs
-    results["formulas"] = {
+    # --- 4. FORMULES (Squelette) ---
+    # C'est ici qu'on implémentera ta logique mathématique spécifique plus tard
+    formulas_section = {
         "F_I1_overloads": {
-            "Fdata_si2s": "A définir (ex: Inom du transfo, Ampacity du câble)",
-            "Fcalculation": "A définir (ex: 1.2 * Inom)",
-            "Ftime": "A définir (ex: courbe inverse)",
-            "Fremark": "Protection contre les surcharges"
+            "Fdata_si2s": "TBD (ex: Inom Transfo, Ampacity Câble)",
+            "Fcalculation": f"TBD (ex: {std_51_cfg.coeff_stab_max} * Inom)",
+            "Ftime": "Long Time / Inverse Curve",
+            "Fremark": "Protection surcharge thermique"
         },
-        "F_I2_phase_short_circuit": {
-             "Fdata_si2s": "A définir (ex: Isc_min bus aval)",
-             "Fcalculation": "A définir (ex: 0.8 * Isc_min)",
-             "Ftime": "Instantaneous ou Short Time",
-             "Fremark": "Protection court-circuit (sélectivité)"
+        "F_I2_phase_short-circuit": {
+            "Fdata_si2s": "TBD (ex: Isc Min Bus Aval)",
+            "Fcalculation": "TBD",
+            "Ftime": "Short Time / Definite Time",
+            "Fremark": "Protection court-circuit sélective"
         },
-        # Tu peux ajouter I3, I4 ici...
+        "F_I3_phase_short-circuit": {
+            "Fdata_si2s": "TBD",
+            "Fcalculation": "TBD",
+            "Ftime": "Instantaneous",
+            "Fremark": "Protection haut débit (si applicable)"
+        },
+        "F_I4_phase_short-circuit": {
+            "Fdata_si2s": "TBD",
+            "Fcalculation": "TBD",
+            "Ftime": "TBD",
+            "Fremark": "Etage supplémentaire (si applicable)"
+        }
     }
 
-    # --- 5. CALCUL (SIMULATION) ---
-    # Si on a trouvé les données, on met le statut à 'computed' (même si le calcul est fake pour l'instant)
-    if data_to and isinstance(data_to, dict) and "error" not in data_to:
-        results["status"] = "computed"
-        
-        # Exemple d'utilisation d'une valeur réelle extraite
-        # Imaginons qu'on veuille Isc 3ph (Ik3ph)
-        if "Ik3ph" in data_to:
-            isc_val = data_to["Ik3ph"]
-            results["comments"].append(f"ℹ️ Info: Isc 3ph sur bus aval = {isc_val} kA")
+    # --- 5. RESULTATS FINAUX ---
+    # Validation basique
+    status = "computed"
+    comments = []
+    
+    if not bus_aval or not bus_amont:
+        status = "error_topology"
+        comments.append("❌ Topologie incomplète")
+    elif isinstance(data_to, dict) and "error" in data_to:
+        status = "warning_data"
+        comments.append(f"⚠️ {data_to['error']}")
     else:
-        results["status"] = "warning_no_data"
-        results["comments"].append("⚠️ Attention : Impossible de récupérer les données électriques pour le calcul.")
+        comments.append(f"✅ Topologie OK : {bus_amont} -> {bus_aval}")
+        if data_to:
+            comments.append("✅ Données Isc Bus Aval récupérées")
+        else:
+            comments.append("⚠️ Pas de données Isc pour le Bus Aval")
 
-    return results
+    return {
+        "ansi_code": "51",
+        "status": status,
+        "topology_used": topology_info,
+        "data_si2s": data_si2s_section,
+        "config": config_section,
+        "formulas": formulas_section,
+        "calculated_thresholds": {
+            "pickup_amps": 0.0, # Placeholder
+            "time_dial": 0.0    # Placeholder
+        },
+        "comments": comments
+    }
