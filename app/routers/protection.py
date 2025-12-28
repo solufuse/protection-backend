@@ -1,6 +1,6 @@
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
-from fastapi.responses import StreamingResponse, JSONResponse, Response
+from fastapi.responses import StreamingResponse, JSONResponse
 from typing import Optional, List, Dict, Any
 from app.core.security import get_current_token
 from app.services import session_manager
@@ -22,18 +22,23 @@ def is_supported(fname: str) -> bool:
 
 def get_merged_dataframes_for_calc(token: str):
     """
-    Reads all relevant files from session and merges them into a dictionary of DataFrames.
+    Reads ALL supported files from session and merges them.
+    If multiple files have the same table (e.g. SCIECLGSum1), rows are concatenated.
     """
     files = session_manager.get_files(token)
     if not files: return {}
     merged_dfs = {}
+    
     for name, content in files.items():
         if is_supported(name):
             dfs = db_converter.extract_data_from_db(content)
             if dfs:
                 for t, df in dfs.items():
                     if t not in merged_dfs: merged_dfs[t] = []
+                    # Optionnel: on pourrait ajouter une colonne 'SourceFile' ici pour tracer l'origine
+                    # df['SourceFile'] = name 
                     merged_dfs[t].append(df)
+                    
     final = {}
     for k, v in merged_dfs.items():
         try: final[k] = pd.concat(v, ignore_index=True)
@@ -69,17 +74,10 @@ def get_config_from_session(token: str) -> ProjectConfig:
 # --- GENERIC CALCULATION LOGIC ---
 
 def _execute_calculation_logic(config: ProjectConfig, token: str):
-    """
-    Generic Orchestrator for all ANSI codes.
-    """
     dfs_dict = get_merged_dataframes_for_calc(token)
-    
-    # 1. Topology Resolution
     config_updated = topology_manager.resolve_all(config, dfs_dict)
     
-    # 2. Calculation Loop
     global_results = []
-    
     for plan in config_updated.plans:
         plan_result = {
             "plan_id": plan.id,
@@ -104,25 +102,17 @@ def _execute_calculation_logic(config: ProjectConfig, token: str):
         "calculation_results": global_results
     }
 
-# --- ANSI 51 SPECIFIC LOGIC ---
+# --- ANSI 51 SPECIFIC LOGIC & EXPORT ---
 
 def _run_ansi_51_logic(config: ProjectConfig, token: str) -> List[dict]:
-    """
-    Runs specifically ANSI 51 logic for all plans, regardless of active_functions config.
-    Used for the specific ANSI 51 endpoints.
-    """
     dfs_dict = get_merged_dataframes_for_calc(token)
     config_updated = topology_manager.resolve_all(config, dfs_dict)
     
     results = []
-    
     for plan in config_updated.plans:
-        # We try to run ANSI 51 for every plan defined in the project
         try:
-            # Call the specific module directly
             res = ansi_51.calculate(plan, config.settings, dfs_dict)
-            
-            # Enrich result with Plan Meta-data for easier reading in list/export
+            # Enrichissement pour l'export liste
             res["plan_id"] = plan.id
             res["plan_type"] = plan.type
             results.append(res)
@@ -133,17 +123,16 @@ def _run_ansi_51_logic(config: ProjectConfig, token: str) -> List[dict]:
                 "status": "error", 
                 "comments": [str(e)]
             })
-            
     return results
 
 def _generate_ansi51_excel(results: List[dict]) -> bytes:
     """
-    Generates a flattened Excel file for ANSI 51 results.
+    Génère un Excel complet en aplatissant toutes les données trouvées dans data_si2s.
     """
     flat_rows = []
     
     for res in results:
-        # Basic Info
+        # 1. Infos de base
         row = {
             "Plan ID": res.get("plan_id"),
             "Type": res.get("plan_type"),
@@ -152,40 +141,63 @@ def _generate_ansi51_excel(results: List[dict]) -> bytes:
             "Bus To": res.get("topology_used", {}).get("bus_to"),
             "Source Origin": res.get("topology_used", {}).get("source_origin"),
         }
+
+        # 2. Seuils calculés
+        thresh = res.get("calculated_thresholds", {})
+        row["Pickup (A)"] = thresh.get("pickup_amps")
+        row["Time Dial"] = thresh.get("time_dial")
         
-        # Thresholds
-        thresholds = res.get("calculated_thresholds", {})
-        row["Pickup (A)"] = thresholds.get("pickup_amps")
-        row["Time Dial"] = thresholds.get("time_dial")
-        
-        # Comments (joined)
+        # 3. Commentaires
         row["Comments"] = " | ".join(res.get("comments", []))
+
+        # 4. DATA DUMP (Dynamique)
+        # On va chercher tout ce qui est dans data_si2s et on l'ajoute en colonnes
+        data_section = res.get("data_si2s", {})
         
-        # Data Info (Debug)
-        data_si2s = res.get("data_si2s", {})
-        if isinstance(data_si2s.get("bus_to_data"), dict):
-             # Example: extract a specific value if needed, e.g., Ik3ph
-             row["Isc (kA)"] = data_si2s.get("bus_to_data").get("Ik3ph")
+        # Bus Amont
+        from_data = data_section.get("bus_from_data")
+        if isinstance(from_data, dict):
+            for k, v in from_data.items():
+                # On préfixe pour éviter les conflits de noms
+                row[f"FROM_{k}"] = v
+        elif isinstance(from_data, str):
+             row["FROM_Info"] = from_data
         
+        # Bus Aval
+        to_data = data_section.get("bus_to_data")
+        if isinstance(to_data, dict):
+            for k, v in to_data.items():
+                row[f"TO_{k}"] = v
+        elif isinstance(to_data, str):
+             row["TO_Info"] = to_data
+
         flat_rows.append(row)
-        
+
     df = pd.DataFrame(flat_rows)
     
+    # Ordonnancement intelligent des colonnes (Base d'abord, puis FROM, puis TO)
+    base_cols = ["Plan ID", "Type", "Status", "Bus From", "Bus To", "Pickup (A)", "Time Dial"]
+    all_cols = list(df.columns)
+    
+    # On sépare les colonnes dynamiques
+    from_cols = sorted([c for c in all_cols if c.startswith("FROM_")])
+    to_cols = sorted([c for c in all_cols if c.startswith("TO_")])
+    other_cols = [c for c in all_cols if c not in base_cols and c not in from_cols and c not in to_cols]
+    
+    # Reconstitution ordonnée
+    final_order = [c for c in base_cols if c in all_cols] + from_cols + to_cols + other_cols
+    df = df[final_order]
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name="ANSI 51 Results", index=False)
-        # Auto-adjust column width (basic)
-        worksheet = writer.sheets["ANSI 51 Results"]
+        df.to_excel(writer, sheet_name="ANSI 51 Full Data", index=False)
+        
+        # Ajustement largeur colonnes
+        worksheet = writer.sheets["ANSI 51 Full Data"]
         for col in worksheet.columns:
             try:
-                max_length = 0
-                column = col[0].column_letter # Get the column name
-                for cell in col:
-                    try: 
-                        if len(str(cell.value)) > max_length: max_length = len(str(cell.value))
-                    except: pass
-                adjusted_width = (max_length + 2)
-                worksheet.column_dimensions[column].width = adjusted_width
+                col_letter = col[0].column_letter
+                worksheet.column_dimensions[col_letter].width = 15
             except: pass
             
     return output.getvalue()
@@ -235,40 +247,25 @@ def explore_data(
             
     return {"data": results}
 
-# --- NEW ANSI 51 ROUTES ---
+# --- ANSI 51 ROUTES ---
 
 @router.post("/ansi_51/run")
 async def run_ansi_51_only(token: str = Depends(get_current_token)):
-    """
-    Runs ONLY the ANSI 51 calculation logic for the current session config.
-    Useful for debugging or specific studies.
-    """
     config = get_config_from_session(token)
     results = _run_ansi_51_logic(config, token)
-    return {
-        "status": "success",
-        "count": len(results),
-        "results": results
-    }
+    return {"status": "success", "count": len(results), "results": results}
 
 @router.get("/ansi_51/export")
 async def export_ansi_51(
     format: str = Query("xlsx", pattern="^(xlsx|json)$"),
     token: str = Depends(get_current_token)
 ):
-    """
-    Exports ANSI 51 results to Excel or JSON.
-    """
     config = get_config_from_session(token)
     results = _run_ansi_51_logic(config, token)
     
     if format == "json":
-        return JSONResponse(
-            content={"results": results}, 
-            headers={"Content-Disposition": "attachment; filename=ansi_51_results.json"}
-        )
+        return JSONResponse(content={"results": results}, headers={"Content-Disposition": "attachment; filename=ansi_51_results.json"})
     
-    # XLSX Export
     excel_bytes = _generate_ansi51_excel(results)
     return StreamingResponse(
         io.BytesIO(excel_bytes),
