@@ -20,7 +20,10 @@ def flatten_dict(d: Dict, parent_key: str = '', sep: str = '_') -> Dict:
 def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> dict:
     settings = full_config.settings
     std_51 = settings.std_51
+    
+    # 1. Get Electrical Data (Uses plan.bus_from which is the FINAL chosen one)
     data_settings = common.get_electrical_parameters(plan, full_config, dfs_dict, global_tx_map)
+    
     thresholds = {"pickup_amps": 0.0, "time_dial": 0.5, "backup_amps": 0.0}
     formulas_section = {}
     
@@ -42,11 +45,28 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
     status = "computed"
     if data_settings.get("kVnom_busfrom") == 0: status = "warning_data (kV=0)"
 
+    # --- TOPOLOGY REPORTING ---
+    # On récupère les attributs injectés par topology_manager
+    user_topo = getattr(plan, "user_bus_from", "N/A")
+    script_topo = getattr(plan, "script_bus_from", "Not Found")
+    final_topo = plan.bus_from # C'est le gagnant
+    origin = getattr(plan, "topology_origin", "unknown")
+
     return {
-        "ansi_code": "51", "status": status,
-        "topology_used": {"bus_from": data_settings.get("Bus_Prim"), "bus_to": data_settings.get("Bus_Sec")},
+        "ansi_code": "51",
+        "status": status,
+        "topology_used": {
+            "origin": origin,           # "script" ou "user"
+            "user_request": user_topo,  # Ce que l'humain a écrit
+            "script_detect": script_topo, # Ce que la machine a vu
+            "final_choice": final_topo,   # Le résultat utilisé
+            "bus_to": data_settings.get("Bus_Sec")
+        },
         "config": { "settings": { "std_51": std_51.dict() }, "type": plan.type, "ct_primary": plan.ct_primary },
-        "data_settings": data_settings, "formulas": formulas_section, "calculated_thresholds": thresholds, "comments": []
+        "data_settings": data_settings,
+        "formulas": formulas_section,
+        "calculated_thresholds": thresholds,
+        "comments": []
     }
 
 def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
@@ -59,67 +79,78 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
         if not dfs: continue
         
         file_config = copy.deepcopy(config)
-        
-        # PROTECTION CONTRE TOPOLOGY MANAGER
         try:
             topology_manager.resolve_all(file_config, dfs)
         except Exception as e:
             print(f"Topology Manager Error: {e}")
-            # On continue quand même, avec les infos partielles du JSON
         
         for plan in file_config.plans:
             try:
                 res = calculate(plan, file_config, dfs, global_tx_map)
-                ds = res.get("data_settings", {})
-                
-                # Check error status
                 if res.get("status", "").startswith("error"):
                     results.append(res)
                     continue
-
+                ds = res.get("data_settings", {})
                 if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: 
-                    # Silent skip or log? Let's log info
-                    res["status"] = "skipped (no kV)"
-                    results.append(res)
                     continue 
-                
                 res["plan_id"] = plan.id
                 res["plan_type"] = plan.type
                 res["source_file"] = filename
                 results.append(res)
             except Exception as e:
-                # C'EST ICI QU'ON EVITE LE 500
-                err_msg = str(e)
                 traceback.print_exc()
-                results.append({
-                    "plan_id": plan.id, 
-                    "source_file": filename, 
-                    "status": "CRASH", 
-                    "comments": [f"Internal Calculation Error: {err_msg}"]
-                })
+                results.append({"plan_id": plan.id, "source_file": filename, "status": "CRASH", "comments": [str(e)]})
     return results
 
 def generate_excel(results: List[dict]) -> bytes:
     flat_rows = []
     for res in results:
-        row = {"Source File": res.get("source_file"), "Plan ID": res.get("plan_id"), "Type": res.get("plan_type"), "Status": res.get("status")}
+        topo = res.get("topology_used", {})
+        
+        row = {
+            "Source File": res.get("source_file"),
+            "Plan ID": res.get("plan_id"),
+            "Type": res.get("plan_type"),
+            "Status": res.get("status"),
+            
+            # --- NEW TOPOLOGY COLUMNS ---
+            "Topo_Origin": topo.get("origin"),
+            "Topo_User_Req": topo.get("user_request"),
+            "Topo_Script_Det": topo.get("script_detect"),
+            "Topo_Final_Used": topo.get("final_choice"),
+        }
+        
         thresh = res.get("calculated_thresholds", {})
         row["Calc_Pickup_I1"] = thresh.get("pickup_amps")
         row["Calc_Backup_I2"] = thresh.get("backup_amps")
+        
         ds = res.get("data_settings", {})
         ds_clean = {k: v for k, v in ds.items() if k not in ["raw_data_from", "raw_data_to"]}
         flat_ds = flatten_dict(ds_clean, parent_key="DS")
         row.update(flat_ds)
         
-        # Ajout des erreurs dans l'excel si crash
         if "comments" in res and res["comments"]:
             row["Error_Logs"] = str(res["comments"])
 
         flat_rows.append(row)
+        
     df = pd.DataFrame(flat_rows)
     if "Plan ID" in df.columns: df = df.sort_values(by=["Plan ID", "Source File"])
     
+    # Reorder columns nicely
+    cols = list(df.columns)
+    priority = ["Source File", "Plan ID", "Type", "Status", 
+                "Topo_Origin", "Topo_User_Req", "Topo_Script_Det", "Topo_Final_Used",
+                "Calc_Pickup_I1", "Calc_Backup_I2"]
+    
+    new_order = [c for c in priority if c in cols] + [c for c in cols if c not in priority]
+    df = df[new_order]
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name="Data Settings", index=False)
+        ws = writer.sheets["Data Settings"]
+        for col in ws.columns:
+            try: ws.column_dimensions[col[0].column_letter].width = 20
+            except: pass
     return output.getvalue()
