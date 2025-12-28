@@ -6,7 +6,7 @@ import pandas as pd
 import math
 import io
 import copy
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 # --- HELPERS DATA ---
 
@@ -78,12 +78,22 @@ def calc_In(mva, kv):
     if kv == 0: return 0
     return (mva * 1000) / (math.sqrt(3) * kv)
 
+def calc_inrush_decay(i_nom: float, ratio: float, tau_ms: float, time_s: float) -> float:
+    """
+    Calcule le courant d'inrush à un instant t (en secondes).
+    Formule : I(t) = In * Ratio * exp(-t / (tau_ms/1000))
+    """
+    if tau_ms <= 0: return 0.0
+    tau_s = tau_ms / 1000.0
+    return (i_nom * ratio) * math.exp(-time_s / tau_s)
+
 # --- CALCUL CORE ---
 
-def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, global_tx_map: dict) -> dict:
+def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> dict:
     """
-    Logique ANSI 51 avec traçabilité des colonnes brutes et formules explicites.
+    Logique ANSI 51 avec Calcul Inrush Intégré.
     """
+    settings = full_config.settings
     bus_amont = plan.bus_from
     bus_aval = plan.bus_to
     
@@ -94,17 +104,10 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, gl
     kvnom_busfrom = float(data_from.get("kVnom", 0) or 0)
     kvnom_busto = float(data_to.get("kVnom", 0) or 0)
     
-    # Extraction des courants de court-circuit spécifiques (ETAP Columns)
-    # Ik3ph = Triphasé symétrique
-    # IkLL = Biphasé (Phase-Phase)
-    # IkLG = Monophasé (Phase-Terre / Homopolaire)
-    
-    # Bus Amont
     from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
     from_ikLL = float(data_from.get("IkLL", 0) or 0) 
     from_ikLG = float(data_from.get("IkLG", 0) or 0) 
     
-    # Bus Aval
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
     to_ikLL = float(data_to.get("IkLL", 0) or 0)
     to_ikLG = float(data_to.get("IkLG", 0) or 0)
@@ -116,69 +119,80 @@ def calculate(plan: ProtectionPlan, settings: GlobalSettings, dfs_dict: dict, gl
     # >>>> TRANSFORMATEUR <<<<
     if plan.type.upper() == "TRANSFORMER":
         
+        # ID Transfo
         tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
-        tx_data = global_tx_map.get(tx_id, {})
         
-        mva_tx = float(tx_data.get("MVA", 0))
-        maxmva_tx = float(tx_data.get("MaxMVA", 0))
-        min_tap = float(tx_data.get("MinTap", 0)) 
-        step_tap = float(tx_data.get("StepTap", 0))
+        # A. Données ETAP (Scan Global)
+        tx_data_etap = global_tx_map.get(tx_id, {})
+        mva_tx = float(tx_data_etap.get("MVA", 0))
+        maxmva_tx = float(tx_data_etap.get("MaxMVA", 0))
+        min_tap = float(tx_data_etap.get("MinTap", 0)) 
+        step_tap = float(tx_data_etap.get("StepTap", 0))
         
-        # Calcul Tension au Tap Min
+        # B. Données Config Utilisateur (Pour Inrush)
+        # On cherche la config du transfo dans le JSON utilisateur
+        tx_user_config = next((t for t in full_config.transformers if t.name == tx_id), None)
+        
+        # B.1 Valeurs par défaut si non trouvées
+        ratio_iencl = tx_user_config.ratio_iencl if tx_user_config else 8.0
+        tau_ms = tx_user_config.tau_ms if tx_user_config else 100.0
+        
+        # C. Calculs Tension & Courants Nominaux
         try:
             percent_drop = 0
             if step_tap != 0 and abs(min_tap) > 1: 
                 percent_drop = (abs(min_tap) * abs(step_tap)) / 100.0
             else:
                 percent_drop = abs(min_tap) / 100.0
-                
             if percent_drop > 0.3: percent_drop = 0
-            
             kvnom_busfrom_tap_min = kvnom_busfrom * (1 - percent_drop)
         except: 
             kvnom_busfrom_tap_min = kvnom_busfrom
         
-        # Courants Nominaux
-        in_prim = calc_In(mva_tx, kvnom_busfrom) # In @ Un
-        in_sec = calc_In(mva_tx, kvnom_busto)    # In @ Sec
-        in_prim_tap = calc_In(mva_tx, kvnom_busfrom_tap_min) # In @ Un-Tap
+        in_prim = calc_In(mva_tx, kvnom_busfrom) 
+        in_sec = calc_In(mva_tx, kvnom_busto)    
+        in_prim_tap = calc_In(mva_tx, kvnom_busfrom_tap_min) 
         
-        # --- COURANTS RAMENES (Referred Currents) ---
+        # D. Calculs INRUSH (Dynamique)
+        # On se base sur le In nominal (à Un) comme référence standard, 
+        # ou In_TapMin pour être conservateur ? Standard = In Nominal.
+        inrush_val_50ms = calc_inrush_decay(in_prim, ratio_iencl, tau_ms, 0.05)
+        inrush_val_900ms = calc_inrush_decay(in_prim, ratio_iencl, tau_ms, 0.9)
+        
+        # E. Courants ramenés
         ratio_u = kvnom_busto / kvnom_busfrom if kvnom_busfrom else 0
-        
         ikLL_sec_ref_prim = to_ikLL * ratio_u
         ik3ph_sec_ref_prim = to_ik3ph * ratio_u
 
         data_settings.update({
-            # Données Plaque
+            # Données Plaque & Config
             "mva_tx [MVA]": mva_tx,
             "maxmva_tx [MaxMVA]": maxmva_tx,
             "kVnom_busfrom": kvnom_busfrom,
             "kVnom_busto": kvnom_busto,
             "Min%Tap_val [Min%Tap]": min_tap,
             
-            # Courants Nominaux Calculés
+            # Paramètres Inrush (Config)
+            "Inrush_Ratio": ratio_iencl,
+            "Inrush_Tau_ms": tau_ms,
+
+            # Courants Nominaux
             "In_prim_Un": round(in_prim, 2),        
             "In_prim_TapMin": round(in_prim_tap, 2),
-            "In_prim_TapMin_Formula": "S / (sqrt(3) * U_min_tap)",
-            "U_min_tap_Formula": f"{kvnom_busfrom} * (1 - {round(percent_drop*100, 2)}%)",
-            
             "In_sec_Un": round(in_sec, 2),          
             
-            # Courants Court-Circuit (Noms ETAP Explicites)
+            # Courants Court-Circuit
             "Isc_2ph_min_prim [IkLL]": from_ikLL,       
             "Isc_zero_min_prim [IkLG]": from_ikLG,      
-            
             "Isc_2ph_min_sec_ref": round(ikLL_sec_ref_prim, 3), 
-            "Isc_2ph_min_sec_ref_Formula": "IkLL_sec * (U_sec / U_prim)",
-            "Isc_2ph_min_sec_ref_RawValues": f"{to_ikLL} * ({kvnom_busto}/{kvnom_busfrom})",
-            
             "Isc_3ph_max_sec_ref": round(ik3ph_sec_ref_prim, 3),
-            "Isc_3ph_max_sec_ref_Formula": "Ik3ph_sec * (U_sec / U_prim)",
-            "Isc_3ph_max_sec_ref_RawValues": f"{to_ik3ph} * ({kvnom_busto}/{kvnom_busfrom})",
             
-            "inrush_50ms": "TBD",
-            "inrush_900ms": "TBD"
+            # Inrush Calculés
+            "inrush_50ms": round(inrush_val_50ms, 2),
+            "inrush_50ms_Formula": f"{round(in_prim,2)} * {ratio_iencl} * exp(-0.05 / {tau_ms/1000})",
+            
+            "inrush_900ms": round(inrush_val_900ms, 2),
+            "inrush_900ms_Formula": f"{round(in_prim,2)} * {ratio_iencl} * exp(-0.9 / {tau_ms/1000})"
         })
         
         std_51 = settings.std_51
@@ -247,7 +261,9 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
         topology_manager.resolve_all(file_config, dfs)
         for plan in file_config.plans:
             try:
-                res = calculate(plan, file_config.settings, dfs, global_tx_map)
+                # Passage de file_config pour accès aux params transformers
+                res = calculate(plan, file_config, dfs, global_tx_map)
+                
                 ds = res.get("data_settings", {})
                 if res["status"] == "error_topology": continue
                 if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: continue 
