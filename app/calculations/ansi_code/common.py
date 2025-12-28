@@ -80,14 +80,16 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
     kvnom_busfrom = float(data_from.get("kVnom", 0) or 0)
     kvnom_busto = float(data_to.get("kVnom", 0) or 0)
     
-    # ETAP IEC Columns: Ik3ph, IkLL (2ph), IkLG (1ph)
+    # ETAP IEC Columns extraction
     from_ikLL = float(data_from.get("IkLL", 0) or 0) 
     from_ikLG = float(data_from.get("IkLG", 0) or 0) 
     from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
+    
+    # Secondary Raw Values
     to_ikLL = float(data_to.get("IkLL", 0) or 0)
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
 
-    # 2. Base Container (Restored Raw Data)
+    # 2. Base Container
     data_settings = {
         "type": plan.type,
         "Bus_Prim": bus_amont,
@@ -142,15 +144,19 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
             "In_prim_TapMin": round(in_prim_tap, 2),
             "In_sec_Un": round(in_sec, 2),          
             
-            # --- RENAMING TO IEC STANDARD ---
+            # --- IEC STANDARD NAMES & RAW DATA ---
             "Ik2min_prim [IkLL]": from_ikLL,       
             "Ik1min_prim [IkLG]": from_ikLG,      
             
+            # EXPLICIT RAW SECONDARY VALUES
+            "Ik2min_sec_raw [IkLL]": to_ikLL,    # <-- NEW
+            "Ik3max_sec_raw [Ik3ph]": to_ik3ph,  # <-- NEW
+            
             "Ik2min_sec_ref": round(ikLL_sec_ref_prim, 3), 
-            "Ik2min_sec_ref_Formula": f"I_sec({round(to_ikLL,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
+            "Ik2min_sec_ref_Formula": f"{round(to_ikLL,2)} * ({kvnom_busto}/{kvnom_busfrom})",
             
             "Ik3max_sec_ref": round(ik3ph_sec_ref_prim, 3),
-            "Ik3max_sec_ref_Formula": f"I_sec({round(to_ik3ph,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
+            "Ik3max_sec_ref_Formula": f"{round(to_ik3ph,2)} * ({kvnom_busto}/{kvnom_busfrom})",
             
             "inrush_50ms": round(inrush_val_50ms, 2),
             "inrush_50ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.05 / {tau_ms/1000})",
