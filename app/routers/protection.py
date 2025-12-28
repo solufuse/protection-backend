@@ -6,7 +6,6 @@ from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
-# Import dynamique ET du module spécifique
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES, ansi_51
 import json
 import pandas as pd
@@ -14,7 +13,7 @@ import io
 
 router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
 
-# --- HELPERS (Legacy global support) ---
+# --- HELPERS ---
 
 def is_supported_protection(fname: str) -> bool:
     e = fname.lower()
@@ -65,7 +64,6 @@ def get_config_from_session(token: str) -> ProjectConfig:
 @router.post("/run")
 async def run_via_session(token: str = Depends(get_current_token)):
     config = get_config_from_session(token)
-    # Generic logic for all modules (kept here or could be moved too)
     dfs_dict = get_merged_dataframes_for_calc(token)
     config_updated = topology_manager.resolve_all(config, dfs_dict)
     global_results = []
@@ -84,10 +82,8 @@ async def run_via_session(token: str = Depends(get_current_token)):
 
 @router.post("/run-json")
 async def run_via_json(config: ProjectConfig, token: str = Depends(get_current_token)):
-    # Similaire à run_via_session mais avec config en body
     dfs_dict = get_merged_dataframes_for_calc(token)
     config_updated = topology_manager.resolve_all(config, dfs_dict)
-    # ... (On garde la logique simplifiée ici pour la démo)
     return {"status": "success", "message": "Generic run logic executed"}
 
 @router.get("/data-explorer")
@@ -111,30 +107,43 @@ def explore_data(
             if file_results: results[fname] = file_results
     return {"data": results}
 
-# --- ANSI 51 ROUTES (Cleaned Up) ---
+# --- ANSI 51 ROUTES ---
 
 @router.post("/ansi_51/run")
-async def run_ansi_51_only(token: str = Depends(get_current_token)):
+async def run_ansi_51_only(
+    include_data: bool = Query(False, description="Set to True to force full data output (Warning: large JSON)"),
+    token: str = Depends(get_current_token)
+):
     """
-    Appelle ansi_51.run_batch_logic et renvoie une version allégée.
+    Exécute ANSI 51. 
+    Par défaut, masque 'data_si2s' pour alléger la réponse.
+    Utiliser ?include_data=true pour tout voir.
     """
     config = get_config_from_session(token)
     
-    # Appel propre au module
     full_results = ansi_51.run_batch_logic(config, token)
     
-    # Version allégée pour l'API JSON
+    if include_data:
+        # On renvoie TOUT
+        return {
+            "status": "success", 
+            "total_scenarios": len(full_results), 
+            "info": "Full data included.",
+            "results": full_results
+        }
+    
+    # Sinon, version allégée
     light_results = []
     for r in full_results:
         r_copy = r.copy()
         if "data_si2s" in r_copy:
-            r_copy["data_si2s"] = "Hidden in preview. Use /export for full data."
+            r_copy["data_si2s"] = "Hidden in preview (use ?include_data=true or /export)"
         light_results.append(r_copy)
 
     return {
         "status": "success", 
         "total_scenarios": len(light_results), 
-        "info": "Results filtered to .si2s/.mdb files only.",
+        "info": "Results filtered. Use include_data=true to see full object.",
         "results": light_results
     }
 
@@ -143,12 +152,7 @@ async def export_ansi_51(
     format: str = Query("xlsx", pattern="^(xlsx|json)$"),
     token: str = Depends(get_current_token)
 ):
-    """
-    Appelle ansi_51.run_batch_logic et ansi_51.generate_excel.
-    """
     config = get_config_from_session(token)
-    
-    # Appel propre au module
     results = ansi_51.run_batch_logic(config, token)
     
     if format == "json":
@@ -157,7 +161,6 @@ async def export_ansi_51(
             headers={"Content-Disposition": "attachment; filename=ansi_51_full.json"}
         )
     
-    # Génération Excel via le module
     excel_bytes = ansi_51.generate_excel(results)
     
     return StreamingResponse(
