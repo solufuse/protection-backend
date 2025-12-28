@@ -79,28 +79,14 @@ def calc_In(mva, kv):
     return (mva * 1000) / (math.sqrt(3) * kv)
 
 def calc_inrush_rms_decay(i_nom: float, ratio: float, tau_ms: float, time_s: float) -> float:
-    """
-    Calcule la valeur EFFICACE (RMS) du courant d'enclenchement à un instant t.
-    Modèle : Decay Curve RMS (Enveloppe exponentielle).
-    I_rms(t) = (In * Ratio) * exp(-t / tau)
-    """
     if tau_ms <= 0: return 0.0
     tau_s = tau_ms / 1000.0
-    
-    # Valeur RMS Initiale Max
     i_rms_initial = i_nom * ratio
-    
-    # Décroissance
-    i_rms_t = i_rms_initial * math.exp(-time_s / tau_s)
-    
-    return i_rms_t
+    return i_rms_initial * math.exp(-time_s / tau_s)
 
 # --- CALCUL CORE ---
 
 def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> dict:
-    """
-    Logique ANSI 51 avec Calcul Inrush RMS.
-    """
     settings = full_config.settings
     bus_amont = plan.bus_from
     bus_aval = plan.bus_to
@@ -116,6 +102,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
     from_ikLG = float(data_from.get("IkLG", 0) or 0) 
     from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
 
+    # Icc sur le bus aval (Secondaire)
     to_ikLL = float(data_to.get("IkLL", 0) or 0)
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
 
@@ -128,19 +115,19 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         
         tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
         
-        # A. Données ETAP
+        # Données ETAP
         tx_data_etap = global_tx_map.get(tx_id, {})
         mva_tx = float(tx_data_etap.get("MVA", 0))
         maxmva_tx = float(tx_data_etap.get("MaxMVA", 0))
         min_tap = float(tx_data_etap.get("MinTap", 0)) 
         step_tap = float(tx_data_etap.get("StepTap", 0))
         
-        # B. Config Inrush (User Input)
+        # Config User
         tx_user_config = next((t for t in full_config.transformers if t.name == tx_id), None)
         ratio_iencl = tx_user_config.ratio_iencl if tx_user_config else 8.0
         tau_ms = tx_user_config.tau_ms if tx_user_config else 100.0
         
-        # C. Tensions & Courants Nominaux
+        # Tensions & Courants Nominaux
         try:
             percent_drop = 0
             if step_tap != 0 and abs(min_tap) > 1: 
@@ -156,21 +143,18 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         in_sec = calc_In(mva_tx, kvnom_busto)    
         in_prim_tap = calc_In(mva_tx, kvnom_busfrom_tap_min) 
         
-        # D. Calculs INRUSH (Decay Curve RMS)
-        # On utilise In_prim_TapMin comme base conservatrice (courant le plus élevé)
-        # Ou In_prim standard ? Souvent In_prim standard car l'enclenchement se fait à vide (Un).
-        # Prenons In_prim (Un) par défaut.
-        base_inrush_current = in_prim 
+        # Inrush
+        inrush_val_50ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.05)
+        inrush_val_900ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.9)
         
-        inrush_val_50ms = calc_inrush_rms_decay(base_inrush_current, ratio_iencl, tau_ms, 0.05)
-        inrush_val_900ms = calc_inrush_rms_decay(base_inrush_current, ratio_iencl, tau_ms, 0.9)
-        
-        # E. Courants ramenés
+        # --- CALCUL COURANTS RAMENES (REFERRED) ---
         ratio_u = kvnom_busto / kvnom_busfrom if kvnom_busfrom else 0
         ikLL_sec_ref_prim = to_ikLL * ratio_u
         ik3ph_sec_ref_prim = to_ik3ph * ratio_u
 
         data_settings.update({
+            "tx_name": tx_id, # Ajout demandé
+            
             "mva_tx [MVA]": mva_tx,
             "maxmva_tx [MaxMVA]": maxmva_tx,
             "kVnom_busfrom": kvnom_busfrom,
@@ -186,15 +170,19 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             
             "Isc_2ph_min_prim [IkLL]": from_ikLL,       
             "Isc_zero_min_prim [IkLG]": from_ikLG,      
-            "Isc_2ph_min_sec_ref": round(ikLL_sec_ref_prim, 3), 
-            "Isc_3ph_max_sec_ref": round(ik3ph_sec_ref_prim, 3),
             
-            # Resultats Inrush RMS
+            # Details Calculs Reflected (Ramenés)
+            "Isc_2ph_min_sec_ref": round(ikLL_sec_ref_prim, 3), 
+            "Isc_2ph_min_sec_ref_Formula": f"I_sec({round(to_ikLL,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
+            
+            "Isc_3ph_max_sec_ref": round(ik3ph_sec_ref_prim, 3),
+            "Isc_3ph_max_sec_ref_Formula": f"I_sec({round(to_ik3ph,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
+            
             "inrush_50ms": round(inrush_val_50ms, 2),
-            "inrush_50ms_Formula": f"In_RMS(0.05s) = {round(base_inrush_current,2)} * {ratio_iencl} * exp(-0.05 / {tau_ms/1000})",
+            "inrush_50ms_Formula": f"In_RMS(0.05s) = {round(in_prim,2)} * {ratio_iencl} * exp(-0.05 / {tau_ms/1000})",
             
             "inrush_900ms": round(inrush_val_900ms, 2),
-            "inrush_900ms_Formula": f"In_RMS(0.9s) = {round(base_inrush_current,2)} * {ratio_iencl} * exp(-0.9 / {tau_ms/1000})"
+            "inrush_900ms_Formula": f"In_RMS(0.9s) = {round(in_prim,2)} * {ratio_iencl} * exp(-0.9 / {tau_ms/1000})"
         })
         
         std_51 = settings.std_51
