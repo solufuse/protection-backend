@@ -6,7 +6,7 @@ from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
-# Import the new ANSI package
+# Import dynamique des modules ANSI
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
 import json
 import pandas as pd
@@ -20,15 +20,11 @@ def is_supported(fname: str) -> bool:
     return e.endswith('.si2s') or e.endswith('.mdb') or e.endswith('.lf1s')
 
 def get_merged_dataframes_for_calc(token: str):
-    """
-    Reads all relevant files from session and merges them into a dictionary of DataFrames.
-    """
     files = session_manager.get_files(token)
     if not files: return {}
     merged_dfs = {}
     for name, content in files.items():
         if is_supported(name):
-            # Extract data using existing db_converter
             dfs = db_converter.extract_data_from_db(content)
             if dfs:
                 for t, df in dfs.items():
@@ -42,18 +38,18 @@ def get_merged_dataframes_for_calc(token: str):
 
 def _execute_calculation_logic(config: ProjectConfig, token: str):
     """
-    Orchestrator function:
-    1. Loads data (SI2S).
-    2. Resolves topology.
-    3. Iterates over each Protection Plan.
-    4. Calls the relevant ANSI modules (51, 67, etc.) dynamically.
+    Orchestrator:
+    1. Load Data
+    2. RESOLVE TOPOLOGY (CRITICAL STEP) -> Updates bus_from/bus_to in plans
+    3. Call ANSI Modules
     """
     dfs_dict = get_merged_dataframes_for_calc(token)
     
-    # 1. Topology Resolution
+    # --- ETAPE CRITIQUE : RESOLUTION TOPOLOGIE ---
+    # C'est ici que topology_manager remplit bus_from / bus_to
     config_updated = topology_manager.resolve_all(config, dfs_dict)
     
-    # 2. Calculation Loop per Plan
+    # --- BOUCLE DE CALCUL ---
     global_results = []
     
     for plan in config_updated.plans:
@@ -62,12 +58,12 @@ def _execute_calculation_logic(config: ProjectConfig, token: str):
             "ansi_results": {}
         }
         
-        # Iterate over active functions requested by the user (e.g., ["51", "67"])
+        # Pour chaque fonction demandée (51, 67, etc.)
         for func_code in plan.active_functions:
             if func_code in AVAILABLE_ANSI_MODULES:
                 module = AVAILABLE_ANSI_MODULES[func_code]
                 
-                # Execute the specific ANSI calculation
+                # Le module reçoit le 'plan' qui contient déjà la topologie résolue
                 try:
                     res = module.calculate(plan, config.settings, dfs_dict)
                     plan_result["ansi_results"][func_code] = res
@@ -82,7 +78,7 @@ def _execute_calculation_logic(config: ProjectConfig, token: str):
         "status": "success",
         "engine": "Protection Coordination (PC) - Modular ANSI",
         "project": config_updated.project_name,
-        "config_summary": config_updated.plans,
+        "config_summary": config_updated.plans, # Contient la preuve de la topologie résolue
         "calculation_results": global_results
     }
 
