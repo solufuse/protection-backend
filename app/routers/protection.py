@@ -10,15 +10,20 @@ from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES, ansi_51
 import json
 import pandas as pd
 import io
-import copy # IMPORTANT pour isoler les scénarios
+import copy
 
 router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
 
 # --- HELPERS ---
 
-def is_supported(fname: str) -> bool:
+def is_supported_protection(fname: str) -> bool:
+    """
+    Filtre strict pour la protection : 
+    Uniquement les bases de données Short-Circuit (.si2s, .mdb).
+    On EXCLUT explicitement les .lf1s (Load Flow) qui n'ont pas les tables de court-circuit.
+    """
     e = fname.lower()
-    return e.endswith('.si2s') or e.endswith('.mdb') or e.endswith('.lf1s')
+    return e.endswith('.si2s') or e.endswith('.mdb')
 
 def get_merged_dataframes_for_calc(token: str):
     """
@@ -28,7 +33,7 @@ def get_merged_dataframes_for_calc(token: str):
     if not files: return {}
     merged_dfs = {}
     for name, content in files.items():
-        if is_supported(name):
+        if is_supported_protection(name):
             dfs = db_converter.extract_data_from_db(content)
             if dfs:
                 for t, df in dfs.items():
@@ -53,24 +58,18 @@ def get_config_from_session(token: str) -> ProjectConfig:
             if name.lower().endswith(".json"):
                 target_content = content
                 break
-    
     if target_content is None:
         raise HTTPException(status_code=404, detail="No 'config.json' found in session.")
-
     try:
-        if isinstance(target_content, bytes):
-            text_content = target_content.decode('utf-8')
-        else:
-            text_content = target_content  
+        if isinstance(target_content, bytes): text_content = target_content.decode('utf-8')
+        else: text_content = target_content  
         data = json.loads(text_content)
         return ProjectConfig(**data)
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid Config JSON: {e}")
 
-# --- GENERIC LOGIC (Legacy / Global) ---
+# --- GENERIC LOGIC ---
 def _execute_calculation_logic(config: ProjectConfig, token: str):
-    # Cette fonction fusionne tout (ancienne méthode)
-    # On la garde pour l'instant pour ne pas casser les autres endpoints
     dfs_dict = get_merged_dataframes_for_calc(token)
     config_updated = topology_manager.resolve_all(config, dfs_dict)
     global_results = []
@@ -90,44 +89,32 @@ def _execute_calculation_logic(config: ProjectConfig, token: str):
 # --- ANSI 51 MULTI-FILE LOGIC ---
 
 def _run_ansi_51_logic(config: ProjectConfig, token: str) -> List[dict]:
-    """
-    Nouveau Moteur : 
-    1. Récupère tous les fichiers.
-    2. Pour CHAQUE fichier SI2S :
-       a. Extrait les données.
-       b. Résout la topologie (car les IDs peuvent changer ou être absents).
-       c. Lance le calcul ANSI 51 pour tous les plans.
-    3. Agglomère tous les résultats.
-    """
     files = session_manager.get_files(token)
     results = []
     
-    # On boucle sur chaque fichier individuellement
     for filename, content in files.items():
-        if not is_supported(filename): 
+        # FILTRE STRICT : On ignore les .lf1s ici
+        if not is_supported_protection(filename): 
             continue
             
-        # 1. Extraction spécifique à CE fichier
         dfs = db_converter.extract_data_from_db(content)
-        if not dfs: 
-            continue
-            
-        # 2. Copie propre de la config pour ne pas mélanger les topologies entre fichiers
+        if not dfs: continue
+        
+        # Copie de config pour isoler ce scénario
         file_config = copy.deepcopy(config)
         
-        # 3. Résolution Topologie (Spécifique à ce fichier SI2S)
+        # Résolution Topo sur CE fichier uniquement
         topology_manager.resolve_all(file_config, dfs)
         
-        # 4. Exécution des calculs pour tous les plans sur CE fichier
         for plan in file_config.plans:
             try:
+                # Calcul ANSI 51
                 res = ansi_51.calculate(plan, file_config.settings, dfs)
                 
-                # Enrichissement des métadonnées
+                # Enrichissement Métadonnées
                 res["plan_id"] = plan.id
                 res["plan_type"] = plan.type
-                res["source_file"] = filename # <--- La clé du tri !
-                
+                res["source_file"] = filename
                 results.append(res)
             except Exception as e:
                 results.append({
@@ -138,72 +125,59 @@ def _run_ansi_51_logic(config: ProjectConfig, token: str) -> List[dict]:
                     "status": "error",
                     "comments": [f"Error in {filename}: {str(e)}"]
                 })
-                
     return results
 
 def _generate_ansi51_excel(results: List[dict]) -> bytes:
-    """
-    Génère l'Excel avec 'Source File' en première colonne.
-    """
     flat_rows = []
-    
     for res in results:
         # Base info
         row = {
-            "Source File": res.get("source_file"), # Priorité 1
+            "Source File": res.get("source_file"),
             "Plan ID": res.get("plan_id"),
             "Type": res.get("plan_type"),
             "Status": res.get("status"),
             "Bus From": res.get("topology_used", {}).get("bus_from"),
             "Bus To": res.get("topology_used", {}).get("bus_to"),
         }
-
-        # Thresholds
+        # Seuils
         thresh = res.get("calculated_thresholds", {})
         row["Pickup (A)"] = thresh.get("pickup_amps")
         row["Time Dial"] = thresh.get("time_dial")
         row["Comments"] = " | ".join(res.get("comments", []))
 
-        # Data Dump (From/To)
+        # --- FULL DATA DUMP ---
+        # On déverse tout le contenu brut des dictionnaires
         data_section = res.get("data_si2s", {})
         
-        # Bus Amont
         from_data = data_section.get("bus_from_data")
         if isinstance(from_data, dict):
-            for k, v in from_data.items():
-                row[f"FROM_{k}"] = v
+            for k, v in from_data.items(): row[f"FROM_{k}"] = v
         
-        # Bus Aval
         to_data = data_section.get("bus_to_data")
         if isinstance(to_data, dict):
-            for k, v in to_data.items():
-                row[f"TO_{k}"] = v
+            for k, v in to_data.items(): row[f"TO_{k}"] = v
 
         flat_rows.append(row)
 
     df = pd.DataFrame(flat_rows)
     
-    # Ordonnancement des colonnes
+    # Ordonnancement Colonnes
     cols = list(df.columns)
-    # On force 'Source File' et 'Plan ID' au début
     prio_cols = ["Source File", "Plan ID", "Type", "Status", "Bus From", "Bus To", "Pickup (A)"]
     final_cols = [c for c in prio_cols if c in cols] + [c for c in cols if c not in prio_cols]
-    
     df = df[final_cols]
     
-    # Tri des lignes pour grouper par Plan puis par Fichier (optionnel mais propre)
     if "Plan ID" in df.columns and "Source File" in df.columns:
         df = df.sort_values(by=["Plan ID", "Source File"])
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name="Multi-Scenario Results", index=False)
-        # Largeur colonnes
-        ws = writer.sheets["Multi-Scenario Results"]
+        df.to_excel(writer, sheet_name="Full Data Results", index=False)
+        # Auto-fit basique
+        ws = writer.sheets["Full Data Results"]
         for col in ws.columns:
-            try: ws.column_dimensions[col[0].column_letter].width = 20
+            try: ws.column_dimensions[col[0].column_letter].width = 18
             except: pass
-            
     return output.getvalue()
 
 # --- ROUTES ---
@@ -238,7 +212,9 @@ def explore_data(
     results = {}
     for fname, content in files.items():
         if filename and filename.lower() not in fname.lower(): continue
-        if not is_supported(fname): continue
+        # Utilisation du filtre strict ici aussi pour éviter de voir les lf1s
+        if not is_supported_protection(fname): continue
+        
         dfs = db_converter.extract_data_from_db(content)
         if dfs:
             file_results = {}
@@ -250,24 +226,50 @@ def explore_data(
 
 @router.post("/ansi_51/run")
 async def run_ansi_51_only(token: str = Depends(get_current_token)):
+    """
+    Endpoint de prévisualisation (Light).
+    Masque les grosses données pour éviter le crash navigateur,
+    mais calcule bien sur TOUS les fichiers SI2S (pas LF1S).
+    """
     config = get_config_from_session(token)
-    results = _run_ansi_51_logic(config, token)
-    return {"status": "success", "total_scenarios": len(results), "results": results}
+    full_results = _run_ansi_51_logic(config, token)
+    
+    # Version allégée pour l'API JSON directe
+    light_results = []
+    for r in full_results:
+        r_copy = r.copy()
+        if "data_si2s" in r_copy:
+            r_copy["data_si2s"] = "Hidden in preview. Use /export for full data."
+        light_results.append(r_copy)
+
+    return {
+        "status": "success", 
+        "total_scenarios": len(light_results), 
+        "info": "Results filtered to .si2s/.mdb files only. Full data hidden in preview.",
+        "results": light_results
+    }
 
 @router.get("/ansi_51/export")
 async def export_ansi_51(
     format: str = Query("xlsx", pattern="^(xlsx|json)$"),
     token: str = Depends(get_current_token)
 ):
+    """
+    Endpoint de téléchargement (Full).
+    Renvoie 100% des données (toutes les colonnes).
+    """
     config = get_config_from_session(token)
     results = _run_ansi_51_logic(config, token)
     
     if format == "json":
-        return JSONResponse(content={"results": results}, headers={"Content-Disposition": "attachment; filename=ansi_51_multi_scenario.json"})
+        return JSONResponse(
+            content={"results": results}, 
+            headers={"Content-Disposition": "attachment; filename=ansi_51_full.json"}
+        )
     
     excel_bytes = _generate_ansi51_excel(results)
     return StreamingResponse(
         io.BytesIO(excel_bytes),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=ansi_51_multi_scenario.xlsx"}
+        headers={"Content-Disposition": "attachment; filename=ansi_51_full.xlsx"}
     )
