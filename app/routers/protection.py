@@ -6,7 +6,6 @@ from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
-# Import dynamique des modules ANSI
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES, ansi_51
 import json
 import pandas as pd
@@ -23,7 +22,7 @@ def is_supported(fname: str) -> bool:
 def get_merged_dataframes_for_calc(token: str):
     """
     Reads ALL supported files from session and merges them.
-    If multiple files have the same table (e.g. SCIECLGSum1), rows are concatenated.
+    Injects 'SourceFilename' column into every dataframe for traceability.
     """
     files = session_manager.get_files(token)
     if not files: return {}
@@ -35,8 +34,11 @@ def get_merged_dataframes_for_calc(token: str):
             if dfs:
                 for t, df in dfs.items():
                     if t not in merged_dfs: merged_dfs[t] = []
-                    # Optionnel: on pourrait ajouter une colonne 'SourceFile' ici pour tracer l'origine
-                    # df['SourceFile'] = name 
+                    
+                    # --- TRACABILITE AJOUTEE ICI ---
+                    # On ajoute le nom du fichier source à chaque ligne
+                    df['SourceFilename'] = name 
+                    
                     merged_dfs[t].append(df)
                     
     final = {}
@@ -112,7 +114,6 @@ def _run_ansi_51_logic(config: ProjectConfig, token: str) -> List[dict]:
     for plan in config_updated.plans:
         try:
             res = ansi_51.calculate(plan, config.settings, dfs_dict)
-            # Enrichissement pour l'export liste
             res["plan_id"] = plan.id
             res["plan_type"] = plan.type
             results.append(res)
@@ -151,14 +152,12 @@ def _generate_ansi51_excel(results: List[dict]) -> bytes:
         row["Comments"] = " | ".join(res.get("comments", []))
 
         # 4. DATA DUMP (Dynamique)
-        # On va chercher tout ce qui est dans data_si2s et on l'ajoute en colonnes
         data_section = res.get("data_si2s", {})
         
         # Bus Amont
         from_data = data_section.get("bus_from_data")
         if isinstance(from_data, dict):
             for k, v in from_data.items():
-                # On préfixe pour éviter les conflits de noms
                 row[f"FROM_{k}"] = v
         elif isinstance(from_data, str):
              row["FROM_Info"] = from_data
@@ -175,29 +174,21 @@ def _generate_ansi51_excel(results: List[dict]) -> bytes:
 
     df = pd.DataFrame(flat_rows)
     
-    # Ordonnancement intelligent des colonnes (Base d'abord, puis FROM, puis TO)
-    base_cols = ["Plan ID", "Type", "Status", "Bus From", "Bus To", "Pickup (A)", "Time Dial"]
-    all_cols = list(df.columns)
+    # Ordonnancement intelligent : on met SourceFilename bien en vue s'il existe
+    cols = list(df.columns)
+    priority_cols = ["Plan ID", "Type", "Status", "Bus From", "Bus To", "Pickup (A)", "Time Dial", "FROM_SourceFilename", "TO_SourceFilename"]
     
-    # On sépare les colonnes dynamiques
-    from_cols = sorted([c for c in all_cols if c.startswith("FROM_")])
-    to_cols = sorted([c for c in all_cols if c.startswith("TO_")])
-    other_cols = [c for c in all_cols if c not in base_cols and c not in from_cols and c not in to_cols]
-    
-    # Reconstitution ordonnée
-    final_order = [c for c in base_cols if c in all_cols] + from_cols + to_cols + other_cols
-    df = df[final_order]
+    final_cols = [c for c in priority_cols if c in cols] + [c for c in cols if c not in priority_cols]
+    df = df[final_cols]
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name="ANSI 51 Full Data", index=False)
-        
-        # Ajustement largeur colonnes
         worksheet = writer.sheets["ANSI 51 Full Data"]
         for col in worksheet.columns:
             try:
                 col_letter = col[0].column_letter
-                worksheet.column_dimensions[col_letter].width = 15
+                worksheet.column_dimensions[col_letter].width = 18
             except: pass
             
     return output.getvalue()
@@ -246,8 +237,6 @@ def explore_data(
             if file_results: results[fname] = file_results
             
     return {"data": results}
-
-# --- ANSI 51 ROUTES ---
 
 @router.post("/ansi_51/run")
 async def run_ansi_51_only(token: str = Depends(get_current_token)):
