@@ -1,6 +1,7 @@
 
 import pandas as pd
 import math
+import re
 from typing import Dict, Any, Optional
 from app.schemas.protection import ProtectionPlan, ProjectConfig
 from app.calculations import db_converter
@@ -67,6 +68,14 @@ def calc_inrush_rms_decay(i_nom: float, ratio: float, tau_ms: float, time_s: flo
     i_rms_initial = (i_nom * ratio) / math.sqrt(2)
     return i_rms_initial * math.exp(-time_s / tau_s)
 
+def parse_ct_primary(ct_string: str) -> float:
+    """Extracts the primary current from a string like '400/1 A' -> 400.0"""
+    if not ct_string: return 0.0
+    match = re.search(r"(\d+)", str(ct_string))
+    if match:
+        return float(match.group(1))
+    return 0.0
+
 # --- MAIN DATA BUILDER ---
 
 def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> Dict[str, Any]:
@@ -83,6 +92,7 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
     from_ikLL = float(data_from.get("IkLL", 0) or 0) 
     from_ikLG = float(data_from.get("IkLG", 0) or 0) 
     from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
+    
     to_ikLL = float(data_to.get("IkLL", 0) or 0)
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
 
@@ -97,7 +107,9 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         "raw_data_to": data_to      
     }
     
-    # 3. Transformer Specific Logic
+    # =========================================
+    # A. TRANSFORMER LOGIC
+    # =========================================
     if plan.type.upper() == "TRANSFORMER":
         tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
         
@@ -141,17 +153,14 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
             "In_prim_TapMin": round(in_prim_tap, 2),
             "In_sec_Un": round(in_sec, 2),          
             
-            # --- PRIMARY SIDE (Dynamic Keys) ---
             f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL,       
             f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,      
             
-            # --- SECONDARY SIDE (Dynamic Keys) ---
             f"Ik2min_sec_raw [IkLL] [{bus_aval}]": to_ikLL,
             f"Ik3max_sec_raw [Ik3ph] [{bus_aval}]": to_ik3ph,
             
             "Ik2min_sec_ref": round(ikLL_sec_ref_prim, 3), 
             "Ik2min_sec_ref_Formula": f"{round(to_ikLL,2)} * ({kvnom_busto}/{kvnom_busfrom})",
-            
             "Ik3max_sec_ref": round(ik3ph_sec_ref_prim, 3),
             "Ik3max_sec_ref_Formula": f"{round(to_ik3ph,2)} * ({kvnom_busto}/{kvnom_busfrom})",
             
@@ -161,13 +170,43 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
             "inrush_900ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.9 / {tau_ms/1000})"
         })
 
+    # =========================================
+    # B. INCOMER / FEEDER LOGIC 
+    # =========================================
     else:
-        # Generic (Feeder / Incomer)
+        # 1. Nominal Current (Base for settings)
+        # We assume CT Primary matches the "Maximum Power" current mentioned in Schneider examples
+        ct_in = parse_ct_primary(plan.ct_primary)
+        
+        # 2. Inrush Calculation for Incomer
+        # An Incomer sees the inrush of the whole station.
+        # We assume a standard Ratio (e.g. 6 In) and Tau (e.g. 100ms) if not specified
+        # This matches the "Courant d'enclenchement" line in your example.
+        ratio_iencl = 6.0 
+        tau_ms = 100.0
+        inrush_val_50ms = calc_inrush_rms_decay(ct_in, ratio_iencl, tau_ms, 0.05)
+        
         data_settings.update({
-            "status": "BASIC_INFO",
-            "kVnom": kvnom_busfrom,
-            f"Ik3max [Ik3ph] [{bus_amont}]": from_ik3ph,
-            f"Ik2min [IkLL] [{bus_amont}]": from_ikLL
+            "status": "Computed (Incomer/Feeder)",
+            "In_prim_Un": ct_in,
+            "In_prim_TapMin": ct_in, 
+            
+            # --- INRUSH (Added for Incomer) ---
+            "Inrush_Ratio": ratio_iencl,
+            "Inrush_Tau_ms": tau_ms,
+            "inrush_50ms": round(inrush_val_50ms, 2),
+            "inrush_50ms_Formula": f"({round(ct_in,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.05 / {tau_ms/1000})",
+            
+            # --- FAULT CURRENTS (Direct reading on Bus From) ---
+            # Matches: "Minimum phase-phase short-circuit... at transformer primary"
+            f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL,
+            f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,
+            
+            # Secondary Refs (For consistency, mapped to primary values)
+            "Ik2min_sec_ref": from_ikLL,
+            "Ik2min_sec_ref_Formula": f"Direct Reading ({bus_amont})",
+            "Ik3max_sec_ref": from_ik3ph,
+            "Ik3max_sec_ref_Formula": f"Direct Reading ({bus_amont})"
         })
         
     return data_settings
