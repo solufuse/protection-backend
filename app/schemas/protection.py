@@ -39,8 +39,9 @@ class ProtectionPlan(BaseModel):
     related_source: Optional[str] = None
     active_functions: List[str] = []
     
-    # --- INTERNAL FIELDS ---
-    topology_origin: Optional[str] = None  # <--- LE CHAMP AJOUTÉ
+    # --- INTERNAL FIELDS (Pour topology_manager) ---
+    topology_origin: Optional[str] = None
+    debug_info: Optional[str] = None          # <--- LE NOUVEAU CHAMP MANQUANT
 
 # --- ROOT CONFIG ---
 class ProjectConfig(BaseModel):
