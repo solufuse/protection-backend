@@ -141,13 +141,13 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
             "In_prim_TapMin": round(in_prim_tap, 2),
             "In_sec_Un": round(in_sec, 2),          
             
-            # IEC STANDARD NAMES
-            "Ik2min_prim [IkLL]": from_ikLL,       
-            "Ik1min_prim [IkLG]": from_ikLG,      
+            # --- PRIMARY SIDE (Dynamic Keys) ---
+            f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL,       
+            f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,      
             
-            # --- DYNAMIC KEYS WITH BUS ID ---
-            f"Ik2min_sec_raw [IkLL] [{bus_aval}]": to_ikLL,   # <-- Dynamic Key with Bus ID
-            f"Ik3max_sec_raw [Ik3ph] [{bus_aval}]": to_ik3ph, # <-- Dynamic Key with Bus ID
+            # --- SECONDARY SIDE (Dynamic Keys) ---
+            f"Ik2min_sec_raw [IkLL] [{bus_aval}]": to_ikLL,
+            f"Ik3max_sec_raw [Ik3ph] [{bus_aval}]": to_ik3ph,
             
             "Ik2min_sec_ref": round(ikLL_sec_ref_prim, 3), 
             "Ik2min_sec_ref_Formula": f"{round(to_ikLL,2)} * ({kvnom_busto}/{kvnom_busfrom})",
@@ -162,12 +162,12 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         })
 
     else:
-        # Generic
+        # Generic (Feeder / Incomer)
         data_settings.update({
             "status": "BASIC_INFO",
             "kVnom": kvnom_busfrom,
-            "Ik3max [Ik3ph]": from_ik3ph,
-            "Ik2min [IkLL]": from_ikLL
+            f"Ik3max [Ik3ph] [{bus_amont}]": from_ik3ph,
+            f"Ik2min [IkLL] [{bus_amont}]": from_ikLL
         })
         
     return data_settings
