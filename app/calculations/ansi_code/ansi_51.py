@@ -2,177 +2,45 @@
 from app.schemas.protection import ProtectionPlan, GlobalSettings, ProjectConfig
 from app.services import session_manager
 from app.calculations import db_converter, topology_manager
+from app.calculations.ansi_code import common # <-- IMPORT DU COMMUN
 import pandas as pd
-import math
 import io
 import copy
-from typing import List, Dict, Any, Optional
-
-# --- HELPERS DATA ---
-
-def _is_supported_protection(fname: str) -> bool:
-    e = fname.lower()
-    return e.endswith('.si2s') or e.endswith('.mdb')
-
-def find_bus_data(dfs_dict: dict, bus_name: str) -> dict:
-    if not bus_name: return None
-    target_df = None
-    for k in dfs_dict.keys():
-        if k.lower() in ["scieclgsum1", "sc_sum_1"]:
-            target_df = dfs_dict[k]
-            break
-    if target_df is None: return None
-    try:
-        col_bus = next((c for c in target_df.columns if c.lower() == 'faultedbus'), None)
-        if not col_bus: return None
-        row = target_df[target_df[col_bus].astype(str).str.strip().str.upper() == str(bus_name).strip().upper()]
-        if row.empty: return None
-        return row.iloc[0].where(pd.notnull(row.iloc[0]), None).to_dict()
-    except: return None
-
-def build_global_transformer_map(files: Dict[str, bytes]) -> Dict[str, Dict]:
-    global_map = {}
-    for fname, content in files.items():
-        if not _is_supported_protection(fname): continue
-        dfs = db_converter.extract_data_from_db(content)
-        if not dfs: continue
-        xfmr_table = None
-        for k in dfs.keys():
-            if k.upper() in ["IXFMR2", "TRANSFORMER"]:
-                xfmr_table = dfs[k]
-                break
-        if xfmr_table is not None and not xfmr_table.empty:
-            for _, row in xfmr_table.iterrows():
-                try:
-                    tid = str(row.get("ID", "")).strip()
-                    if not tid: continue
-                    if tid not in global_map:
-                        global_map[tid] = {"MVA": 0.0, "MaxMVA": 0.0, "MinTap": 0.0, "StepTap": 0.0}
-                    val_mva = float(row.get("MVA", 0) or 0)
-                    if val_mva > global_map[tid]["MVA"]: global_map[tid]["MVA"] = val_mva
-                    val_max = float(row.get("MaxMVA", 0) or 0)
-                    if val_max > global_map[tid]["MaxMVA"]: global_map[tid]["MaxMVA"] = val_max
-                    val_min = float(row.get("Min%Tap", 0) or 0)
-                    curr_min = global_map[tid]["MinTap"]
-                    if abs(val_min) > abs(curr_min): global_map[tid]["MinTap"] = val_min
-                    val_step = float(row.get("Step%Tap", 0) or 0)
-                    if val_step != 0 and global_map[tid]["StepTap"] == 0: global_map[tid]["StepTap"] = val_step
-                except: continue
-    return global_map
-
-def calc_In(mva, kv):
-    if kv == 0: return 0
-    return (mva * 1000) / (math.sqrt(3) * kv)
-
-def calc_inrush_rms_decay(i_nom: float, ratio: float, tau_ms: float, time_s: float) -> float:
-    if tau_ms <= 0: return 0.0
-    tau_s = tau_ms / 1000.0
-    i_rms_initial = (i_nom * ratio) / math.sqrt(2)
-    return i_rms_initial * math.exp(-time_s / tau_s)
-
-# --- CALCUL CORE ---
+from typing import List, Dict, Any
 
 def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> dict:
+    """
+    ANSI 51 Logic utilizing shared common data settings.
+    """
     settings = full_config.settings
     std_51 = settings.std_51
     
-    bus_amont = plan.bus_from
-    bus_aval = plan.bus_to
+    # 1. Get Shared Electrical Data (Physic Engine)
+    # This ensures consistency across all ANSI codes
+    data_settings = common.get_electrical_parameters(plan, full_config, dfs_dict, global_tx_map)
     
-    # 1. Extraction Données
-    data_from = find_bus_data(dfs_dict, bus_amont) or {}
-    data_to = find_bus_data(dfs_dict, bus_aval) or {}
-    
-    kvnom_busfrom = float(data_from.get("kVnom", 0) or 0)
-    kvnom_busto = float(data_to.get("kVnom", 0) or 0)
-    
-    from_ikLL = float(data_from.get("IkLL", 0) or 0) 
-    from_ikLG = float(data_from.get("IkLG", 0) or 0) 
-    from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
-    to_ikLL = float(data_to.get("IkLL", 0) or 0)
-    to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
-
-    # 2. Containers
-    data_settings = {"type": plan.type}
+    # 2. Prepare containers
+    thresholds = {"pickup_amps": 0.0, "time_dial": 0.5, "backup_amps": 0.0}
     formulas_section = {}
-    thresholds = {"pickup_amps": 0.0, "time_dial": 0.5, "backup_amps": 0.0} 
     
-    # >>>> TRANSFORMATEUR <<<<
+    # 3. Calculate Thresholds based on Data
     if plan.type.upper() == "TRANSFORMER":
-        tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
+        # Extract needed values
+        in_prim_tap = data_settings.get("In_prim_TapMin", 0)
+        ikLL_sec_ref_prim = data_settings.get("Isc_2ph_min_sec_ref", 0)
         
-        # Données
-        tx_data_etap = global_tx_map.get(tx_id, {})
-        mva_tx = float(tx_data_etap.get("MVA", 0))
-        maxmva_tx = float(tx_data_etap.get("MaxMVA", 0))
-        min_tap = float(tx_data_etap.get("MinTap", 0)) 
-        step_tap = float(tx_data_etap.get("StepTap", 0))
-        
-        tx_user_config = next((t for t in full_config.transformers if t.name == tx_id), None)
-        ratio_iencl = tx_user_config.ratio_iencl if tx_user_config else 8.0
-        tau_ms = tx_user_config.tau_ms if tx_user_config else 100.0
-        
-        # Tensions & Courants
-        try:
-            percent_drop = 0
-            if step_tap != 0 and abs(min_tap) > 1: percent_drop = (abs(min_tap) * abs(step_tap)) / 100.0
-            else: percent_drop = abs(min_tap) / 100.0
-            if percent_drop > 0.3: percent_drop = 0
-            kvnom_busfrom_tap_min = kvnom_busfrom * (1 - percent_drop)
-        except: kvnom_busfrom_tap_min = kvnom_busfrom
-        
-        in_prim = calc_In(mva_tx, kvnom_busfrom) 
-        in_sec = calc_In(mva_tx, kvnom_busto)    
-        in_prim_tap = calc_In(mva_tx, kvnom_busfrom_tap_min) 
-        
-        # Inrush
-        inrush_val_50ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.05)
-        inrush_val_900ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.9)
-        
-        # Courants ramenés
-        ratio_u = kvnom_busto / kvnom_busfrom if kvnom_busfrom else 0
-        ikLL_sec_ref_prim = to_ikLL * ratio_u
-        ik3ph_sec_ref_prim = to_ik3ph * ratio_u
-
-        # --- CALCUL DES SEUILS ---
+        # Threshold 1: Overload (Surcharge)
         pickup_i1 = round(std_51.coeff_stab_max * in_prim_tap, 2)
+        
+        # Threshold 2: Backup (Short-Circuit)
         backup_i2 = round(std_51.coeff_backup_min * (ikLL_sec_ref_prim * 1000), 2)
         
         thresholds["pickup_amps"] = pickup_i1
         thresholds["backup_amps"] = backup_i2
-
-        data_settings.update({
-            "tx_name": tx_id,
-            "Bus_Prim": bus_amont, # <-- Ajout du Bus Primaire
-            "Bus_Sec": bus_aval,   # <-- Ajout du Bus Secondaire
-            
-            "mva_tx [MVA]": mva_tx,
-            "maxmva_tx [MaxMVA]": maxmva_tx,
-            "kVnom_busfrom": kvnom_busfrom,
-            "kVnom_busto": kvnom_busto,
-            "Min%Tap_val [Min%Tap]": min_tap,
-            "Inrush_Ratio": ratio_iencl,
-            "Inrush_Tau_ms": tau_ms,
-            "In_prim_Un": round(in_prim, 2),        
-            "In_prim_TapMin": round(in_prim_tap, 2),
-            "In_sec_Un": round(in_sec, 2),          
-            
-            "Isc_2ph_min_prim [IkLL]": from_ikLL,       
-            "Isc_zero_min_prim [IkLG]": from_ikLG,      
-            
-            "Isc_2ph_min_sec_ref": round(ikLL_sec_ref_prim, 3), 
-            "Isc_2ph_min_sec_ref_Formula": f"I_sec({round(to_ikLL,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
-            "Isc_3ph_max_sec_ref": round(ik3ph_sec_ref_prim, 3),
-            "Isc_3ph_max_sec_ref_Formula": f"I_sec({round(to_ik3ph,2)}) * ({kvnom_busto}/{kvnom_busfrom})",
-            "inrush_50ms": round(inrush_val_50ms, 2),
-            "inrush_50ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.05 / {tau_ms/1000})",
-            "inrush_900ms": round(inrush_val_900ms, 2),
-            "inrush_900ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.9 / {tau_ms/1000})"
-        })
         
         formulas_section["F_I1_overloads"] = {
-            "Fdata_si2s": f"In_prim_TapMin={round(in_prim_tap,2)}A",
-            "Fcalculation": f"{std_51.coeff_stab_max} * {round(in_prim_tap,2)} = {pickup_i1} A",
+            "Fdata_si2s": f"In_prim_TapMin={in_prim_tap}A",
+            "Fcalculation": f"{std_51.coeff_stab_max} * {in_prim_tap} = {pickup_i1} A",
             "Fremark": "Seuil Surcharge"
         }
         
@@ -181,34 +49,19 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "Fcalculation": f"{std_51.coeff_backup_min} * {round(ikLL_sec_ref_prim*1000, 2)} = {backup_i2} A",
             "Fremark": "Seuil Court-Circuit (Backup)"
         }
-
-    else:
-        # Autres
-        data_settings.update({
-            "status": "BASIC_INFO",
-            "Bus_Prim": bus_amont,
-            "kVnom": kvnom_busfrom,
-            "Isc_3ph [Ik3ph]": from_ik3ph,
-            "Isc_2ph [IkLL]": from_ikLL
-        })
-
+        
+    # 4. Status Check
     status = "computed"
     comments = []
-    if not bus_aval or not bus_amont: status = "error_topology"
-    elif kvnom_busfrom == 0: status = "warning_data (kV=0)"
+    if data_settings.get("kVnom_busfrom") == 0: 
+        status = "warning_data (kV=0)"
 
     return {
         "ansi_code": "51",
         "status": status,
-        "topology_used": {"bus_from": bus_amont, "bus_to": bus_aval},
-        "data_si2s": { 
-             "FaultedBus_bus_from": bus_amont,
-             "bus_from_data": data_from,
-             "FaultedBus_bus_to": bus_aval,
-             "bus_to_data": data_to
-        },
+        "topology_used": {"bus_from": data_settings.get("Bus_Prim"), "bus_to": data_settings.get("Bus_Sec")},
         "config": { "settings": { "std_51": std_51.dict() }, "type": plan.type, "ct_primary": plan.ct_primary },
-        "data_settings": data_settings,
+        "data_settings": data_settings, # On renvoie le bloc commun
         "formulas": formulas_section,
         "calculated_thresholds": thresholds,
         "comments": comments
@@ -216,20 +69,27 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
 
 def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
     files = session_manager.get_files(token)
-    global_tx_map = build_global_transformer_map(files)
+    # Using the builder from common
+    global_tx_map = common.build_global_transformer_map(files)
+    
     results = []
     for filename, content in files.items():
-        if not _is_supported_protection(filename): continue
+        if not common.is_supported_protection(filename): continue
         dfs = db_converter.extract_data_from_db(content)
         if not dfs: continue
+        
         file_config = copy.deepcopy(config)
         topology_manager.resolve_all(file_config, dfs)
+        
         for plan in file_config.plans:
             try:
                 res = calculate(plan, file_config, dfs, global_tx_map)
                 ds = res.get("data_settings", {})
+                
+                # Filtering empty results
                 if res["status"] == "error_topology": continue
                 if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: continue 
+                
                 res["plan_id"] = plan.id
                 res["plan_type"] = plan.type
                 res["source_file"] = filename
