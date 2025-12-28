@@ -80,12 +80,9 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
     kvnom_busfrom = float(data_from.get("kVnom", 0) or 0)
     kvnom_busto = float(data_to.get("kVnom", 0) or 0)
     
-    # ETAP IEC Columns extraction
     from_ikLL = float(data_from.get("IkLL", 0) or 0) 
     from_ikLG = float(data_from.get("IkLG", 0) or 0) 
     from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
-    
-    # Secondary Raw Values
     to_ikLL = float(data_to.get("IkLL", 0) or 0)
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
 
@@ -144,13 +141,13 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
             "In_prim_TapMin": round(in_prim_tap, 2),
             "In_sec_Un": round(in_sec, 2),          
             
-            # --- IEC STANDARD NAMES & RAW DATA ---
+            # IEC STANDARD NAMES
             "Ik2min_prim [IkLL]": from_ikLL,       
             "Ik1min_prim [IkLG]": from_ikLG,      
             
-            # EXPLICIT RAW SECONDARY VALUES
-            "Ik2min_sec_raw [IkLL]": to_ikLL,    # <-- NEW
-            "Ik3max_sec_raw [Ik3ph]": to_ik3ph,  # <-- NEW
+            # --- DYNAMIC KEYS WITH BUS ID ---
+            f"Ik2min_sec_raw [IkLL] [{bus_aval}]": to_ikLL,   # <-- Dynamic Key with Bus ID
+            f"Ik3max_sec_raw [Ik3ph] [{bus_aval}]": to_ik3ph, # <-- Dynamic Key with Bus ID
             
             "Ik2min_sec_ref": round(ikLL_sec_ref_prim, 3), 
             "Ik2min_sec_ref_Formula": f"{round(to_ikLL,2)} * ({kvnom_busto}/{kvnom_busfrom})",
