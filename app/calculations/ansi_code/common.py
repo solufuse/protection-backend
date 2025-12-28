@@ -67,7 +67,6 @@ def calc_inrush_rms_decay(i_nom: float, ratio: float, tau_ms: float, time_s: flo
     """Calculates RMS Inrush current using decay curve."""
     if tau_ms <= 0: return 0.0
     tau_s = tau_ms / 1000.0
-    # Peak to RMS conversion (divide by sqrt(2))
     i_rms_initial = (i_nom * ratio) / math.sqrt(2)
     return i_rms_initial * math.exp(-time_s / tau_s)
 
@@ -93,14 +92,15 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
     to_ikLL = float(data_to.get("IkLL", 0) or 0)
     to_ik3ph = float(data_to.get("Ik3ph", 0) or 0)
 
-    # 2. Base Container (CLEANED)
+    # 2. Base Container (With RAW DATA restored)
     data_settings = {
         "type": plan.type,
         "Bus_Prim": bus_amont,
         "Bus_Sec": bus_aval,
         "kVnom_busfrom": kvnom_busfrom,
-        "kVnom_busto": kvnom_busto
-        # Removed raw_data dumps to keep output clean
+        "kVnom_busto": kvnom_busto,
+        "raw_data_from": data_from, # <-- Restored
+        "raw_data_to": data_to      # <-- Restored
     }
     
     # 3. Transformer Specific Logic
@@ -137,7 +137,7 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         inrush_val_50ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.05)
         inrush_val_900ms = calc_inrush_rms_decay(in_prim, ratio_iencl, tau_ms, 0.9)
         
-        # Reflected Currents (Secondary to Primary)
+        # Reflected Currents
         ratio_u = kvnom_busto / kvnom_busfrom if kvnom_busfrom else 0
         ikLL_sec_ref_prim = to_ikLL * ratio_u
         ik3ph_sec_ref_prim = to_ik3ph * ratio_u
@@ -165,7 +165,7 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         })
 
     else:
-        # Generic / Incomer Logic
+        # Generic Logic
         data_settings.update({
             "status": "BASIC_INFO",
             "kVnom": kvnom_busfrom,

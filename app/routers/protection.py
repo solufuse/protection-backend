@@ -6,7 +6,6 @@ from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
-# Import dynamique des modules ANSI
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES, ansi_51
 import json
 import pandas as pd
@@ -21,7 +20,6 @@ def is_supported_protection(fname: str) -> bool:
     return e.endswith('.si2s') or e.endswith('.mdb')
 
 def get_merged_dataframes_for_calc(token: str):
-    """Legacy helper for generic run"""
     files = session_manager.get_files(token)
     if not files: return {}
     merged_dfs = {}
@@ -61,7 +59,7 @@ def get_config_from_session(token: str) -> ProjectConfig:
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid Config JSON: {e}")
 
-# --- GENERIC RUN ROUTES (ANSI 50/51/etc all together) ---
+# --- GENERIC RUN ROUTES ---
 
 @router.post("/run")
 async def run_via_session(token: str = Depends(get_current_token)):
@@ -82,56 +80,43 @@ async def run_via_session(token: str = Depends(get_current_token)):
         global_results.append(plan_result)
     return {"status": "success", "results": global_results}
 
-@router.get("/data-explorer")
-def explore_data(
-    table_search: Optional[str] = Query(None),
-    filename: Optional[str] = Query(None),
-    token: str = Depends(get_current_token)
-):
-    files = session_manager.get_files(token)
-    if not files: return {"data": {}}
-    results = {}
-    for fname, content in files.items():
-        if filename and filename.lower() not in fname.lower(): continue
-        if not is_supported_protection(fname): continue
-        dfs = db_converter.extract_data_from_db(content)
-        if dfs:
-            file_results = {}
-            for table_name, df in dfs.items():
-                if table_search and table_search.upper() not in table_name.upper(): continue
-                file_results[table_name] = {"rows": len(df), "columns": list(df.columns)}
-            if file_results: results[fname] = file_results
-    return {"data": results}
-
-# --- ANSI 51 SPECIFIC ROUTES (BATCH & EXCEL) ---
+# --- ANSI 51 SPECIFIC ROUTES ---
 
 @router.post("/ansi_51/run")
 async def run_ansi_51_only(
-    include_data: bool = Query(False, description="Set to True to see raw data_si2s dump"),
+    include_data: bool = Query(False, description="Set to True to see raw data (si2s dump and raw ETAP rows)"),
     token: str = Depends(get_current_token)
 ):
     """
-    Exécute uniquement le module ANSI 51 sur tous les fichiers.
-    Retourne le JSON avec data_settings et les seuils calculés.
+    Exécute ANSI 51.
+    Si include_data=False (défaut), masque data_si2s et les raw_data du data_settings.
     """
     config = get_config_from_session(token)
-    
-    # Appel du moteur de calcul (ansi_51 qui appelle common)
     full_results = ansi_51.run_batch_logic(config, token)
     
-    # Filtrage pour l'affichage JSON (éviter de crasher le navigateur)
     if include_data:
+        # On renvoie tout brut de fonderie
         final_results = full_results
-        msg = "Full data included."
+        msg = "Full data included (DB rows & Raw ETAP values)."
     else:
+        # On nettoie
         final_results = []
         for r in full_results:
             r_copy = r.copy()
-            # On masque le dump brut SQL (data_si2s) mais on garde data_settings
+            
+            # 1. Masquer le dump SQL global
             if "data_si2s" in r_copy:
-                r_copy["data_si2s"] = "Hidden (use include_data=true to see raw DB rows)"
+                r_copy["data_si2s"] = "Hidden (use include_data=true)"
+            
+            # 2. Masquer les dumps ETAP dans data_settings
+            if "data_settings" in r_copy:
+                ds = r_copy["data_settings"].copy()
+                ds.pop("raw_data_from", None) # On retire raw_data_from
+                ds.pop("raw_data_to", None)   # On retire raw_data_to
+                r_copy["data_settings"] = ds
+                
             final_results.append(r_copy)
-        msg = "Raw data hidden. Use include_data=true to see full DB rows."
+        msg = "Raw data hidden for readability. Use include_data=true to debug."
 
     return {
         "status": "success", 
@@ -145,9 +130,6 @@ async def export_ansi_51(
     format: str = Query("xlsx", pattern="^(xlsx|json)$"),
     token: str = Depends(get_current_token)
 ):
-    """
-    Télécharge le rapport complet ANSI 51 (avec seuils et data settings).
-    """
     config = get_config_from_session(token)
     results = ansi_51.run_batch_logic(config, token)
     
@@ -157,7 +139,6 @@ async def export_ansi_51(
             headers={"Content-Disposition": "attachment; filename=ansi_51_full.json"}
         )
     
-    # Génération Excel
     excel_bytes = ansi_51.generate_excel(results)
     
     return StreamingResponse(
