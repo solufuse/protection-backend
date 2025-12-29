@@ -28,11 +28,22 @@ class LinkData(BaseModel):
 class ProtectionPlan(BaseModel):
     id: str
     type: str
-    bus_from: Optional[str] = None
+    
+    # Champs optionnels pour éviter les erreurs de validation
+    bus_from: Optional[str] = None 
     bus_to: Optional[str] = None
+    
     ct_primary: str = "CT 100/1 A"
     related_source: Optional[str] = None
     active_functions: List[str] = []
+    
+    # Champs internes explicites (pour aider l'autocomplétion)
+    topology_origin: Optional[str] = None
+    debug_info: Optional[str] = None
+
+    # 🔥 LA SOLUTION : Autoriser les champs dynamiques 🔥
+    class Config:
+        extra = "allow" 
 
 class ProjectConfig(BaseModel):
     settings: GlobalSettings = GlobalSettings()
