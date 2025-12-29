@@ -70,10 +70,13 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
     return {
         "ansi_code": "51",
         "status": status,
-        "topology_used": {
-            "origin": topo_origin,
-            "bus_from": data_settings.get("Bus_Prim"),
-            "bus_to": data_settings.get("Bus_Sec")
+        
+        "topology_report": {
+            "final_decision": getattr(plan, "topology_final", "config_user"),
+            "user_config": getattr(plan, "topology_user", {}),
+            "script_extracted": getattr(plan, "topology_script", {}),
+            "effective_bus_from": data_settings.get("Bus_Prim"),
+            "effective_bus_to": data_settings.get("Bus_Sec")
         },
         "config": { 
             "settings": { "std_51": std_51.dict() if std_51 else {} }, 
