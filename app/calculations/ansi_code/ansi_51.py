@@ -20,7 +20,6 @@ def flatten_dict(d: Dict, parent_key: str = '', sep: str = '_') -> Dict:
 
 def parse_ct_value(ct_str: str) -> float:
     try:
-        # Extrait "400" de "CT 400/1 A"
         match = re.search(r"(\d+)", str(ct_str))
         return float(match.group(1)) if match else 0.0
     except: return 0.0
@@ -34,49 +33,69 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
     
     thresholds_structure = {}
     
-    # Base currents
-    in_prim_tap = common_data.get("In_prim_TapMin", 0)
-    ik2min_ref = common_data.get("Ik2min_sec_ref", 0)
+    # Common vars
     ct_prim_val = parse_ct_value(plan.ct_primary)
-    
-    # --- I1 (OVERLOAD - THERMAL) ---
-    # Base: In_prim_TapMin (Capacity)
-    pickup_i1 = round(std_51.factor_I1 * in_prim_tap, 2)
-    thresholds_structure["I1_overloads"] = {
-        "I1_report": {
-            "pickup_amps": pickup_i1,
-            "time_dial": std_51.time_dial_I1.value, 
-            "curve_type": std_51.time_dial_I1.curve,
-            "calculated_formula": f"{std_51.factor_I1} * {in_prim_tap} = {pickup_i1} A"
-        }
-    }
 
-    # --- I2 (BACKUP - DISTANCE) ---
-    # Base: Ik2min_sec_ref (Fault at end of line)
-    # Note: Only relevant if we have short-circuit data (Transformers/Feeders)
-    if ik2min_ref > 0:
-        backup_i2 = round(std_51.factor_I2 * (ik2min_ref * 1000), 2)
-        thresholds_structure["I2_backup"] = {
-            "I2_report": {
-                "pickup_amps": backup_i2,
-                "time_dial": std_51.time_dial_I2.value,
-                "curve_type": std_51.time_dial_I2.curve,
-                "calculated_formula": f"{std_51.factor_I2} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"
+    # --- LOGIQUE TRANSFO (Riche en métadonnées) ---
+    if plan.type.upper() == "TRANSFORMER":
+        # Data Extraction
+        in_prim_tap = common_data.get("In_prim_TapMin", 0)
+        ik2min_ref = common_data.get("Ik2min_sec_ref", 0)
+        mva_tx = common_data.get("mva_tx [MVA]", 0)
+        min_tap = common_data.get("Min%Tap_val [Min%Tap]", 0)
+        inrush_900 = common_data.get("inrush_900ms", 0)
+
+        # I1 (Thermal)
+        pickup_i1 = round(std_51.factor_I1 * in_prim_tap, 2)
+        thresholds_structure["I1_overloads"] = {
+            "I1_data_si2s": {
+                "mva_tx": mva_tx,
+                "Min_Tap_Percent": min_tap,
+                "In_prim_TapMin": in_prim_tap,
+                "inrush_900ms": inrush_900
+            },
+            "I1_report": {
+                "pickup_amps": pickup_i1,
+                "time_dial": std_51.time_dial_I1.value, 
+                "curve_type": std_51.time_dial_I1.curve,
+                "calculated_formula": f"{std_51.factor_I1} * {in_prim_tap} = {pickup_i1} A"
             }
         }
-    
-    # --- I3 (INTERMEDIATE) ---
-    # Base: Configurable (User Choice). Let's default to In_prim logic for now or specific
-    # For now, disable if factor is default 0.8 (same as I2) to avoid duplicates, 
-    # unless specifically configured differently.
-    # Let's say I3 is typically 0.8 * Ik2min_prim (Local Backup)? 
-    # For simplicity, we skip specific I3 logic unless requested, or mirror I2 logic.
-    pass 
+
+        # I2 (Backup Short-Circuit)
+        if ik2min_ref > 0:
+            backup_i2 = round(std_51.factor_I2 * (ik2min_ref * 1000), 2)
+            thresholds_structure["I2_backup"] = {
+                "I2_data_si2s": {
+                    "Ik2min_sec_ref_kA": ik2min_ref,
+                    "Backup_Factor": std_51.factor_I2
+                },
+                "I2_report": {
+                    "pickup_amps": backup_i2,
+                    "time_dial": std_51.time_dial_I2.value,
+                    "curve_type": std_51.time_dial_I2.curve,
+                    "calculated_formula": f"{std_51.factor_I2} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"
+                }
+            }
+
+    # --- LOGIQUE GENERIQUE (Incomer / Coupling) ---
+    else:
+        in_ref = common_data.get("In_prim_Un", 0)
+        pickup_i1 = round(1.0 * in_ref, 2)
+        
+        thresholds_structure["I1_overloads"] = {
+            "I1_data_si2s": { "In_Ref": in_ref },
+            "I1_report": {
+                "pickup_amps": pickup_i1,
+                "time_dial": std_51.time_dial_I1.value,
+                "curve_type": std_51.time_dial_I1.curve,
+                "calculated_formula": f"1.0 * {in_ref} = {pickup_i1} A"
+            }
+        }
 
     # --- I4 (HIGH SET - INSTANTANEOUS) ---
-    # Base: CT Primary (Robustness) or In_prim
-    # Schneider Logic: 7 * InTC. We use Factor * CT.
-    if std_51.factor_I4 > 2.0: # Only activate if factor looks like a High Set (> 2x)
+    # S'applique à tous les types (Transfo, Arrivée...)
+    if std_51.factor_I4 > 2.0: 
         highset_i4 = round(std_51.factor_I4 * ct_prim_val, 2)
         thresholds_structure["I4_highset"] = {
             "I4_data": {"CT_Primary": ct_prim_val},
@@ -161,7 +180,6 @@ def generate_excel(results: List[dict]) -> bytes:
         
         thresholds = res.get("thresholds", {})
         
-        # Helper to extract report
         def add_th(key, prefix):
             rep = thresholds.get(key, {}).get(f"{prefix}_report", {})
             if rep:
@@ -172,7 +190,7 @@ def generate_excel(results: List[dict]) -> bytes:
 
         add_th("I1_overloads", "I1")
         add_th("I2_backup", "I2")
-        add_th("I4_highset", "I4") # Added I4
+        add_th("I4_highset", "I4")
 
         ds = res.get("common_data", {})
         ds_clean = {k: v for k, v in ds.items() if k not in ["raw_data_from", "raw_data_to"]}
