@@ -12,6 +12,12 @@ import zipfile
 # Define the router
 router = APIRouter(prefix="/loadflow", tags=["Loadflow Analysis"])
 
+# --- HELPERS ---
+def is_supported_loadflow(fname: str) -> bool:
+    """Checks if the file extension is supported for Loadflow analysis."""
+    e = fname.lower()
+    return e.endswith('.l1fs') or e.endswith('.mdb')
+
 def get_lf_config_from_session(token: str) -> LoadflowSettings:
     """
     Helper: Retrieves and parses 'config.json' from user session.
