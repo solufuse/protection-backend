@@ -46,7 +46,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             },
             "I1_report": {
                 "pickup_amps": pickup_i1,
-                "time_dial": std_51.time_dial_default,
+                "time_dial": std_51.time_dial_I1, # [!] Specific I1 Dial
                 "equation_logic": f"Factor_I1 ({std_51.factor_I1}) * In_prim_TapMin",
                 "calculated_formula": f"{std_51.factor_I1} * {in_prim_tap} = {pickup_i1} A"
             }
@@ -62,7 +62,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             },
             "I2_report": {
                 "pickup_amps": backup_i2,
-                "time_dial": std_51.time_dial_default, # Peut être différent si une stratégie spécifique existe
+                "time_dial": std_51.time_dial_I2, # [!] Specific I2 Dial
                 "equation_logic": f"Factor_I2 ({std_51.factor_I2}) * Ik2min_sec_ref",
                 "calculated_formula": f"{std_51.factor_I2} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"
             }
@@ -77,7 +77,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "I1_data_si2s": { "In_Ref": in_ref },
             "I1_report": {
                 "pickup_amps": pickup_i1,
-                "time_dial": std_51.time_dial_default,
+                "time_dial": std_51.time_dial_I1, # Use I1 by default for main threshold
                 "equation_logic": "1.0 * In_Ref",
                 "calculated_formula": f"1.0 * {in_ref} = {pickup_i1} A"
             }
@@ -103,7 +103,6 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "ct_primary": plan.ct_primary 
         },
         "thresholds": thresholds_structure,
-        # On garde data_settings pour le débug global, mais le coeur est maintenant dans thresholds
         "global_electrical_data": data_settings, 
         "comments": []
     }
@@ -133,7 +132,6 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
                     results.append(res)
                     continue
                 
-                # Filtrage simple des cas vides
                 ds = res.get("global_electrical_data", {})
                 if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: 
                     continue 
@@ -153,7 +151,6 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
     return results
 
 def generate_excel(results: List[dict]) -> bytes:
-    # Mise à jour de l'export Excel pour refléter la nouvelle structure
     flat_rows = []
     for res in results:
         topo = res.get("topology_used", {})
@@ -166,7 +163,6 @@ def generate_excel(results: List[dict]) -> bytes:
             "Topo_BusFrom": topo.get("bus_from")
         }
         
-        # Aplatissement intelligent des nouveaux seuils
         thresholds = res.get("thresholds", {})
         
         # I1

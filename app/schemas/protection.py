@@ -8,9 +8,12 @@ class Std51Settings(BaseModel):
     factor_I3: float = 0.8
     factor_I4: float = 1.15
     
-    # Time Settings
-    time_dial_default: float = 0.5  # Ajout pour rendre le TMS configurable
-
+    # Time Settings (Specific per threshold)
+    time_dial_I1: float = 0.5
+    time_dial_I2: float = 0.1  # Souvent plus rapide pour le court-circuit
+    time_dial_I3: float = 0.1
+    time_dial_I4: float = 0.1
+    
     # Legacy/Internal defaults
     selectivity_adder: float = 0.3
     backup_strategy: str = "REMOTE_FLOOR"
