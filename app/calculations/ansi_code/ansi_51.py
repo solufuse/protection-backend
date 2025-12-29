@@ -51,15 +51,14 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         inrush_900 = common_data.get("inrush_900ms", 0)
         inrush_50 = common_data.get("inrush_50ms", 0)
         ik3max_sec_ref = common_data.get("Ik3max_sec_ref", 0)
-        
-        # Retrieve Upstream Min Short-Circuit (Ik2min Primary)
-        # Note: In database, this is usually in kA. We need Amps for comparison.
+        # [!] Retrieve Inrush Ratio (Default to 7 if missing)
+        tx_inrush_ratio = common_data.get("Inrush_Ratio", 7.0)
+
+        # Primary Short Circuit (kA -> A)
         ik2min_prim_raw = 0
         for k, v in common_data.items():
             if "Ik2min_prim" in k and isinstance(v, (int, float)):
                 ik2min_prim_raw = v; break
-        
-        # Auto-convert kA to A if value is small (e.g. < 500)
         ik2min_prim_amps = ik2min_prim_raw * 1000 if ik2min_prim_raw < 500 else ik2min_prim_raw
 
         # I1 (THERMAL OVERLOAD)
@@ -71,7 +70,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "I1_report": {
                 "pickup_amps": pickup_i1, "time_dial": std_51.time_dial_I1.value, "curve_type": std_51.time_dial_I1.curve,
                 "calculated_formula": f"{std_51.factor_I1} * {in_prim_tap} = {pickup_i1} A",
-                "methodology_note": f"Thermal Overload: Set to {int((std_51.factor_I1-1)*100)}% above max nominal current ({in_prim_tap}A) to allow operation while protecting windings."
+                "methodology_note": f"Thermal Overload: Set to {int((std_51.factor_I1-1)*100)}% above max nominal current ({in_prim_tap}A)."
             }
         }
 
@@ -83,16 +82,35 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
                 "I2_report": {
                     "pickup_amps": backup_i2, "time_dial": std_51.time_dial_I2.value, "curve_type": std_51.time_dial_I2.curve,
                     "calculated_formula": f"{std_51.factor_I2} * {round(ik2min_ref*1000, 2)} = {backup_i2} A",
-                    "methodology_note": f"Distance Backup: Set to {int(std_51.factor_I2*100)}% of minimum end-of-line short-circuit (Icc2min Sec = {round(ik2min_ref*1000, 2)}A) to ensure downstream fault detection."
+                    "methodology_note": f"Distance Backup: Set to {int(std_51.factor_I2*100)}% of min end-of-line SC ({round(ik2min_ref*1000, 2)}A)."
                 }
             }
             
-        # I4 Data Context (Specific for Transformer)
+        # I4 Context (For Checks)
         i4_data_context = {
             "CT_Primary": ct_prim_val,
+            "In_Transfo_Max": in_prim_tap,
+            "Inrush_Ratio": tx_inrush_ratio, # Added for visibility
             "Limit_Low_Inrush_50ms": inrush_50,
             "Limit_Low_IkSec_Max": round(ik3max_sec_ref * 1000, 2) if ik3max_sec_ref else 0,
-            "Limit_High_IkPrim_Min": round(ik2min_prim_amps, 2) # Converted to Amps
+            "Limit_High_IkPrim_Min": round(ik2min_prim_amps, 2)
+        }
+        
+        # [!] SMART LOGIC FOR TRANSFORMER I4
+        # Force factor to be Inrush Ratio + 1
+        i4_smart_factor = tx_inrush_ratio + 1.0
+        highset_i4 = round(i4_smart_factor * in_prim_tap, 2)
+        
+        thresholds_structure["I4_highset"] = {
+            "I4_data": i4_data_context,
+            "I4_report": {
+                "pickup_amps": highset_i4, 
+                "time_dial": std_51.time_dial_I4.value, 
+                "curve_type": std_51.time_dial_I4.curve,
+                # Explicit Formula: (7 + 1) * In
+                "calculated_formula": f"({tx_inrush_ratio} [Ratio] + 1) * {in_prim_tap} = {highset_i4} A", 
+                "methodology_note": f"Smart Inrush: Calculated as (Inrush Ratio {tx_inrush_ratio} + 1 Margin) * Nominal Current to ensure stability."
+            }
         }
 
     # --- GENERIC LOGIC (Incomer / Coupling) ---
@@ -105,32 +123,21 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "I1_report": {
                 "pickup_amps": pickup_i1, "time_dial": std_51.time_dial_I1.value, "curve_type": std_51.time_dial_I1.curve,
                 "calculated_formula": f"{std_51.factor_I1} * {in_ref} = {pickup_i1} A",
-                "methodology_note": f"Standard: Set based on nominal current or CT rating ({in_ref}A)."
+                "methodology_note": f"Standard: Set based on nominal current ({in_ref}A)."
             }
         }
-        i4_data_context = {"CT_Primary": ct_prim_val}
-
-    # --- I4 (HIGH SET) ---
-    if std_51.factor_I4 > 2.0: 
-        highset_i4 = round(std_51.factor_I4 * ct_prim_val, 2)
         
-        # Methodology text construction (English)
-        meth_text = "High-Set Instantaneous based on CT."
-        if ptype == "TRANSFORMER":
-            meth_text = "Current Selectivity: Threshold must be > Inrush ({}A) and > Max Secondary SC ({}A) to avoid nuisance tripping, while remaining < Min Primary SC ({}A).".format(
-                i4_data_context.get("Limit_Low_Inrush_50ms"),
-                i4_data_context.get("Limit_Low_IkSec_Max"),
-                i4_data_context.get("Limit_High_IkPrim_Min")
-            )
-
-        thresholds_structure["I4_highset"] = {
-            "I4_data": i4_data_context,
-            "I4_report": {
-                "pickup_amps": highset_i4, "time_dial": std_51.time_dial_I4.value, "curve_type": std_51.time_dial_I4.curve,
-                "calculated_formula": f"{std_51.factor_I4} * {ct_prim_val} (CT) = {highset_i4} A",
-                "methodology_note": meth_text
+        # Standard High Set Logic based on Config Factor
+        if std_51.factor_I4 > 2.0:
+            highset_i4 = round(std_51.factor_I4 * ct_prim_val, 2)
+            thresholds_structure["I4_highset"] = {
+                "I4_data": {"CT_Primary": ct_prim_val},
+                "I4_report": {
+                    "pickup_amps": highset_i4, "time_dial": std_51.time_dial_I4.value, "curve_type": std_51.time_dial_I4.curve,
+                    "calculated_formula": f"{std_51.factor_I4} * {ct_prim_val} (CT) = {highset_i4} A",
+                    "methodology_note": "High-Set Instantaneous based on CT Primary."
+                }
             }
-        }
 
     status = "computed"
     if common_data.get("kVnom_busfrom") == 0: status = "warning_data (kV=0)"
