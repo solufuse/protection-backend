@@ -71,10 +71,14 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         "ansi_code": "51",
         "status": status,
         
+        
         "topology_report": {
-            "final_decision": getattr(plan, "topology_final", "config_user"),
-            "user_config": getattr(plan, "topology_user", {}),
-            "script_extracted": getattr(plan, "topology_script", {}),
+            "final_decision": plan.topology_info.get("final_decision", "config_user") if hasattr(plan, "topology_info") else "config_user",
+            "user_config": {
+                "bus_from": plan.topology_info.get("user_bus_from") if hasattr(plan, "topology_info") else None,
+                "bus_to": plan.topology_info.get("user_bus_to") if hasattr(plan, "topology_info") else None
+            },
+            "script_extracted": plan.topology_info.get("script_extracted", {}) if hasattr(plan, "topology_info") else {},
             "effective_bus_from": data_settings.get("Bus_Prim"),
             "effective_bus_to": data_settings.get("Bus_Sec")
         },
