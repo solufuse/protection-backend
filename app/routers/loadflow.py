@@ -16,8 +16,12 @@ router = APIRouter(prefix="/loadflow", tags=["Loadflow Analysis"])
 # --- HELPERS ---
 
 def is_supported_loadflow(fname: str) -> bool:
+    """
+    Check if the file is a valid Loadflow source (.lf1s or .mdb).
+    .si2s are excluded for Loadflow.
+    """
     e = fname.lower()
-    return e.endswith('.lf1s') or e.endswith('.mdb') or e.endswith('.si2s')
+    return e.endswith('.lf1s') or e.endswith('.mdb')
 
 def get_lf_config_from_session(token: str) -> LoadflowSettings:
     files = session_manager.get_files(token)

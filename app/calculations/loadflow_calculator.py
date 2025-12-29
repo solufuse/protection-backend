@@ -7,21 +7,32 @@ from app.schemas.loadflow_schema import TransformerData, SwingBusInfo, StudyCase
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
     """
     Core logic for Loadflow Analysis.
+
+    Features:
+    - Multi-Scenario Support: Groups files by Study Case ID + Config.
+    - Battle Logic: Determines winner based on (1) Tolerance Check, (2) Precision, (3) Proximity.
+    - Silent Mode: Minimal logging to avoid spamming production logs.
     """
+    # [?] [THOUGHT] Logic remains the same, only the data extraction layer is updated for compatibility.
     print(f"🚀 START ANALYSIS (Multi-Scenario Strategy - Silent Mode)")
     results = []
     
     target = settings.target_mw
     tol = settings.tolerance_mw
+    
+    # Dictionary to track the champion for each scenario group.
+    # Key: (StudyID, Config) -> Value: {filename, delta, valid, reason}
     champions = {}
+    
     file_count = 0
 
     for filename, content in files_content.items():
         clean_name = os.path.basename(filename)
         ext = clean_name.lower()
         
-        # [decision:logic] Only .lf1s and .mdb are officially targeted
-        if clean_name.startswith('~$') or not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb')):
+        # Filter temp files
+        # [decision:logic] Only .lf1s and .mdb are officially targeted for Loadflow. .si2s are excluded.
+        if clean_name.startswith('~$') or not (ext.endswith('.lf1s') or ext.endswith('.mdb')):
             continue
             
         file_count += 1
