@@ -1,12 +1,14 @@
-
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
 class Std51Settings(BaseModel):
-    coeff_stab_max: float = 1.2
-    coeff_backup_min: float = 0.8
-    coeff_sensibilite: float = 0.8
-    coeff_inrush_margin: float = 1.15
+    # [decision:logic] Updated to match config.json keys (factor_I1..I4)
+    factor_I1: float = 1.2
+    factor_I2: float = 0.8
+    factor_I3: float = 0.8
+    factor_I4: float = 1.15
+    
+    # Legacy/Internal defaults (kept for compatibility logic if needed later)
     selectivity_adder: float = 0.3
     backup_strategy: str = "REMOTE_FLOOR"
 
@@ -39,9 +41,8 @@ class ProtectionPlan(BaseModel):
     # Champs internes
     topology_origin: Optional[str] = None
     debug_info: Optional[str] = None
-    meta_data: Optional[Dict[str, Any]] = None # <--- Pour supporter ton code
+    meta_data: Optional[Dict[str, Any]] = None
 
-    # BLINDAGE : Autorise tout champ supplémentaire
     class Config:
         extra = "allow" 
 
