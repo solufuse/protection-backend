@@ -29,7 +29,6 @@ class ProtectionPlan(BaseModel):
     id: str
     type: str
     
-    # Champs optionnels pour éviter les erreurs de validation
     bus_from: Optional[str] = None 
     bus_to: Optional[str] = None
     
@@ -37,11 +36,12 @@ class ProtectionPlan(BaseModel):
     related_source: Optional[str] = None
     active_functions: List[str] = []
     
-    # Champs internes explicites (pour aider l'autocomplétion)
+    # Champs internes
     topology_origin: Optional[str] = None
     debug_info: Optional[str] = None
+    meta_data: Optional[Dict[str, Any]] = None # <--- Pour supporter ton code
 
-    # 🔥 LA SOLUTION : Autoriser les champs dynamiques 🔥
+    # BLINDAGE : Autorise tout champ supplémentaire
     class Config:
         extra = "allow" 
 
