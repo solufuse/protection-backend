@@ -16,32 +16,11 @@ router = APIRouter(prefix="/loadflow", tags=["Loadflow Analysis"])
 
 def is_supported_loadflow(fname: str) -> bool:
     """
-    Checks if the file extension is supported for Loadflow analysis (.l1fs or .mdb).
+    Checks if the file extension is supported for Loadflow analysis.
+    Supports .lf1s, .l1fs (as backup), and .mdb.
     """
-    e = fname.lower()
-    return e.endswith('.l1fs') or e.endswith('.mdb')
-
-def get_lf_config_from_session(token: str) -> LoadflowSettings:
-    """
-    Helper: Retrieves and parses 'config.json' from user session.
-    """
-    files = session_manager.get_files(token)
-    if not files: raise HTTPException(status_code=400, detail="Session empty.")
-    
-    target_content = None
-    if "config.json" in files: target_content = files["config.json"]
-    else:
-        for name, content in files.items():
-            if name.lower().endswith(".json"): target_content = content; break
-    
-    if target_content is None: raise HTTPException(status_code=404, detail="No config.json found.")
-
-    try:
-        if isinstance(target_content, bytes): text_content = target_content.decode('utf-8')
-        else: text_content = target_content
-        data = json.loads(text_content)
-        if "loadflow_settings" not in data: raise HTTPException(status_code=400, detail="Missing 'loadflow_settings'.")
-        return LoadflowSettings(**data["loadflow_settings"])
+    clean_name = fname.strip().lower()
+    return clean_name.endswith('.lf1s') or clean_name.endswith('.l1fs') or clean_name.endswith('.mdb')
     except Exception as e: raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
 def _generate_excel_bytes(data: dict) -> bytes:
