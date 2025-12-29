@@ -12,6 +12,15 @@ import zipfile
 # Define the router
 router = APIRouter(prefix="/loadflow", tags=["Loadflow Analysis"])
 
+# --- HELPERS ---
+
+def is_supported_loadflow(fname: str) -> bool:
+    """
+    Check if the file is a valid Loadflow source (.lf1s or .mdb).
+    """
+    e = fname.lower()
+    return e.endswith('.lf1s') or e.endswith('.mdb') or e.endswith('.si2s')
+
 def get_lf_config_from_session(token: str) -> LoadflowSettings:
     """
     Helper: Retrieves and parses 'config.json' from user session.
@@ -38,7 +47,6 @@ def get_lf_config_from_session(token: str) -> LoadflowSettings:
 def _generate_excel_bytes(data: dict) -> bytes:
     """
     Internal helper: Transforms the analysis data into an Excel file (bytes).
-    This logic was extracted from generate_flat_excel to allow saving to disk without streaming.
     """
     results = data.get("results", [])
     flat_rows = []
@@ -84,7 +92,6 @@ def _generate_excel_bytes(data: dict) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df_final.to_excel(writer, sheet_name="Results", index=False)
-        # Apply simple column width formatting
         for col in writer.sheets["Results"].columns:
             try: writer.sheets["Results"].column_dimensions[col[0].column_letter].width = 18
             except: pass
@@ -92,10 +99,6 @@ def _generate_excel_bytes(data: dict) -> bytes:
     return output.getvalue()
 
 def generate_flat_excel(data: dict, filename: str):
-    """
-    Generates a StreamingResponse for downloading the Excel file.
-    Uses the helper _generate_excel_bytes.
-    """
     excel_content = _generate_excel_bytes(data)
     return StreamingResponse(
         io.BytesIO(excel_content), 
@@ -115,6 +118,7 @@ async def run_loadflow_session(
     """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
+    # Filter only supported files before calc if needed, though calculator handles it
     data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
     
     if format == "xlsx":
@@ -138,49 +142,6 @@ async def run_loadflow_winners_only(
         return generate_flat_excel(data, "loadflow_export_winners.xlsx")
         
     return data
-
-@router.get("/export")
-async def export_all_files(format: str = Query("xlsx", pattern="^(xlsx|json)$"), token: str = Depends(get_current_token)):
-    """
-    Download global report (All Files).
-    """
-    config = get_lf_config_from_session(token)
-    files = session_manager.get_files(token)
-    data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
-    if format == "json": return JSONResponse(content=data, headers={"Content-Disposition": "attachment; filename=loadflow_export_all.json"})
-    return generate_flat_excel(data, "loadflow_export_all.xlsx")
-
-@router.get("/export-win")
-async def export_winners_flat(format: str = Query("xlsx", pattern="^(xlsx|json)$"), token: str = Depends(get_current_token)):
-    """
-    Download report for WINNERS ONLY.
-    """
-    config = get_lf_config_from_session(token)
-    files = session_manager.get_files(token)
-    data = loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
-    if format == "json": return JSONResponse(content=data, headers={"Content-Disposition": "attachment; filename=loadflow_export_winners.json"})
-    return generate_flat_excel(data, "loadflow_export_winners.xlsx")
-
-@router.get("/export-l1fs")
-async def export_winners_l1fs(token: str = Depends(get_current_token)):
-    """
-    Download ZIP archive of winning source files (.LF1S).
-    """
-    config = get_lf_config_from_session(token)
-    files = session_manager.get_files(token)
-    analysis = loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
-    winners = analysis.get("results", [])
-    if not winners: raise HTTPException(status_code=404, detail="No winners found.")
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for win in winners:
-            fname = win.get("filename")
-            if fname in files:
-                content = files[fname]
-                if isinstance(content, (dict, list)): content = json.dumps(content, indent=2)
-                zip_file.writestr(fname, content)
-    zip_buffer.seek(0)
-    return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=loadflow_winners_source.zip"})
 
 @router.post("/run-and-save")
 async def run_and_save_loadflow(
