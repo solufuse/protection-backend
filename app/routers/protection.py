@@ -5,9 +5,11 @@ from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
-from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
+# [+] [INFO] Import common specifically for the new endpoint
+from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES, common
 import json
 import pandas as pd
+import copy 
 
 # IMPORT DU SOUS-ROUTEUR
 from app.routers import ansi_51 as ansi_51_router
@@ -15,9 +17,6 @@ from app.routers import ansi_51 as ansi_51_router
 router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
 
 # --- INCLUSION DES SOUS-MODULES ---
-# Cela génère automatiquement les routes :
-# /protection/ansi_51/run
-# /protection/ansi_51/export
 router.include_router(ansi_51_router.router)
 
 # --- HELPERS (Utilisés pour le RUN GLOBAL) ---
@@ -66,8 +65,65 @@ def get_config_from_session(token: str) -> ProjectConfig:
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Invalid Config JSON: {e}")
 
+# --- NEW ENDPOINT: COMMON RUN ---
+
+@router.post("/common/run")
+async def run_common_parameters(token: str = Depends(get_current_token)):
+    """
+    Executes the 'Common' analysis (Electrical Parameters, Inrush, Topology) for all plans.
+    Does NOT run specific ANSI codes (50/51/67), only gathers base data.
+    URL: POST /protection/common/run
+    """
+    config = get_config_from_session(token)
+    files = session_manager.get_files(token)
+    # [context:flow] Build global map of transformers for Inrush calculation
+    global_tx_map = common.build_global_transformer_map(files)
+    
+    results = []
+    
+    for filename, content in files.items():
+        if not common.is_supported_protection(filename): continue
+        dfs = db_converter.extract_data_from_db(content)
+        if not dfs: continue
+        
+        # [context:flow] Resolve topology per file to avoid conflicts
+        # Use deepcopy to ensure we don't pollute the global config object during iteration
+        file_config = copy.deepcopy(config)
+        topology_manager.resolve_all(file_config, dfs)
+        
+        for plan in file_config.plans:
+            try:
+                # [decision:logic] Extract electrical params (In, Ik, Inrush) using common lib
+                data_settings = common.get_electrical_parameters(plan, file_config, dfs, global_tx_map)
+                
+                # Basic status check
+                status = "ok"
+                if data_settings.get("kVnom_busfrom") == 0: status = "warning (kV=0)"
+
+                results.append({
+                    "plan_id": plan.id,
+                    "plan_type": plan.type,
+                    "source_file": filename,
+                    "status": status,
+                    "topology": {
+                        "origin": plan.topology_origin,
+                        "bus_from": plan.bus_from,
+                        "bus_to": plan.bus_to
+                    },
+                    "common_data": data_settings
+                })
+            except Exception as e:
+                results.append({
+                    "plan_id": plan.id,
+                    "source_file": filename,
+                    "status": "error",
+                    "error": str(e)
+                })
+                
+    return {"status": "success", "count": len(results), "results": results}
+
+
 # --- GLOBAL RUN (L'Orchestrateur) ---
-# Cette route restera toujours là pour lancer TOUT d'un coup
 
 @router.post("/run")
 async def run_global_protection(token: str = Depends(get_current_token)):
