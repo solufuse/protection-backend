@@ -15,6 +15,12 @@ class TransformerData(BaseModel):
     ratio_iencl: float
     tau_ms: float
 
+class LinkData(BaseModel):
+    id: str
+    length_km: float
+    impedance_zd: str
+    impedance_z0: str
+
 class GlobalSettings(BaseModel):
     std_51: Optional[Std51Settings] = None
 
@@ -33,5 +39,7 @@ class ProjectConfig(BaseModel):
     settings: Optional[GlobalSettings] = None
     transformers: List[TransformerData] = []
     plans: List[ProtectionPlan] = []
+    links_data: List[LinkData] = []  # Restored field
     standard: str = "IEC"
     frequency: float = 50.0
+    loadflow_settings: Optional[Any] = None
