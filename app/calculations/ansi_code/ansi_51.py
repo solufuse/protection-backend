@@ -1,4 +1,3 @@
-
 from app.schemas.protection import ProtectionPlan, GlobalSettings, ProjectConfig
 from app.services import session_manager
 from app.calculations import db_converter, topology_manager
@@ -9,6 +8,7 @@ import copy
 from typing import List, Dict, Any
 import traceback
 
+# Utility to flatten dictionaries for Excel export
 def flatten_dict(d: Dict, parent_key: str = '', sep: str = '_') -> Dict:
     items = []
     for k, v in d.items():
@@ -19,7 +19,8 @@ def flatten_dict(d: Dict, parent_key: str = '', sep: str = '_') -> Dict:
 
 def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> dict:
     settings = full_config.settings
-    std_51 = settings.std_51
+    # Check if settings and std_51 exist to avoid None errors
+    std_51 = settings.std_51 if settings else None
     
     # 1. Electrical Data
     data_settings = common.get_electrical_parameters(plan, full_config, dfs_dict, global_tx_map)
@@ -27,25 +28,43 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
     thresholds = {"pickup_amps": 0.0, "time_dial": 0.5, "backup_amps": 0.0}
     formulas_section = {}
     
+    # If no settings are provided, we use safe defaults
+    f1 = std_51.factor_I1 if std_51 else 1.2
+    f2 = std_51.factor_I2 if std_51 else 0.8
+    
     if plan.type.upper() == "TRANSFORMER":
         in_prim_tap = data_settings.get("In_prim_TapMin", 0)
         ik2min_ref = data_settings.get("Ik2min_sec_ref", 0)
-        pickup_i1 = round(std_51.coeff_stab_max * in_prim_tap, 2)
-  # Updated to use factor_I1 instead of deleted attribute\n  # Fixed: removed dependency on schema attribute\n        backup_i2 = round(std_51.coeff_backup_min * (ik2min_ref * 1000), 2)
+        
+        # Calculation using factor_I1 and factor_I2
+        pickup_i1 = round(f1 * in_prim_tap, 2)
+        backup_i2 = round(f2 * (ik2min_ref * 1000), 2)
+        
         thresholds["pickup_amps"] = pickup_i1
         thresholds["backup_amps"] = backup_i2
-        formulas_section["F_I1_overloads"] = {"Fdata_si2s": f"In_prim_TapMin={in_prim_tap}A", "Fcalculation": f"{std_51.coeff_stab_max} * {in_prim_tap} = {pickup_i1} A"}
-  # Updated to use factor_I1 instead of deleted attribute\n  # Fixed: removed dependency on schema attribute\n        formulas_section["F_I2_backup"] = {"Fdata_si2s": f"Ik2min_ref={round(ik2min_ref*1000, 2)}A", "Fcalculation": f"{std_51.coeff_backup_min} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"}
+        
+        # Formulas updated for reporting
+        formulas_section["F_I1_overloads"] = {
+            "Fdata_si2s": f"In_prim_TapMin={in_prim_tap}A", 
+            "Fcalculation": f"{f1} (Factor I1) * {in_prim_tap} = {pickup_i1} A"
+        }
+        formulas_section["F_I2_backup"] = {
+            "Fdata_si2s": f"Ik2min_ref={round(ik2min_ref*1000, 2)}A", 
+            "Fcalculation": f"{f2} (Factor I2) * {round(ik2min_ref*1000, 2)} = {backup_i2} A"
+        }
     else:
         in_ref = data_settings.get("In_prim_Un", 0)
         pickup_i1 = round(1.0 * in_ref, 2)
         thresholds["pickup_amps"] = pickup_i1
-        formulas_section["F_I1_overloads"] = {"Fdata_si2s": f"In_Ref={in_ref}A", "Fcalculation": f"1.0 * {in_ref} = {pickup_i1} A"}
+        formulas_section["F_I1_overloads"] = {
+            "Fdata_si2s": f"In_Ref={in_ref}A", 
+            "Fcalculation": f"1.0 * {in_ref} = {pickup_i1} A"
+        }
 
     status = "computed"
-    if data_settings.get("kVnom_busfrom") == 0: status = "warning_data (kV=0)"
+    if data_settings.get("kVnom_busfrom") == 0: 
+        status = "warning_data (kV=0)"
 
-    # Topology Reporting
     topo_origin = getattr(plan, "topology_origin", "unknown")
 
     return {
@@ -56,7 +75,11 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "bus_from": data_settings.get("Bus_Prim"),
             "bus_to": data_settings.get("Bus_Sec")
         },
-        "config": { "settings": { "std_51": std_51.dict() }, "type": plan.type, "ct_primary": plan.ct_primary },
+        "config": { 
+            "settings": { "std_51": std_51.dict() if std_51 else {} }, 
+            "type": plan.type, 
+            "ct_primary": plan.ct_primary 
+        },
         "data_settings": data_settings,
         "formulas": formulas_section,
         "calculated_thresholds": thresholds,
@@ -75,7 +98,6 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
         
         file_config = copy.deepcopy(config)
         
-        # Safe Topology Execution
         try:
             topology_manager.resolve_all(file_config, dfs)
         except Exception as e:
@@ -84,7 +106,6 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
         for plan in file_config.plans:
             try:
                 res = calculate(plan, file_config, dfs, global_tx_map)
-                
                 if res.get("status", "").startswith("error"):
                     results.append(res)
                     continue
@@ -98,13 +119,12 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
                 res["source_file"] = filename
                 results.append(res)
             except Exception as e:
-                # Capture l'erreur pour JSON
                 traceback.print_exc()
                 results.append({
                     "plan_id": plan.id, 
                     "source_file": filename, 
                     "status": "CRASH", 
-                    "comments": [f"Error: {str(e)}"]
+                    "comments": [f"Error during calculation: {str(e)}"]
                 })
     return results
 
@@ -123,6 +143,7 @@ def generate_excel(results: List[dict]) -> bytes:
         thresh = res.get("calculated_thresholds", {})
         row["Calc_Pickup_I1"] = thresh.get("pickup_amps")
         row["Calc_Backup_I2"] = thresh.get("backup_amps")
+        
         ds = res.get("data_settings", {})
         ds_clean = {k: v for k, v in ds.items() if k not in ["raw_data_from", "raw_data_to"]}
         flat_ds = flatten_dict(ds_clean, parent_key="DS")
@@ -132,10 +153,12 @@ def generate_excel(results: List[dict]) -> bytes:
             row["Error_Logs"] = str(res["comments"])
 
         flat_rows.append(row)
+    
     df = pd.DataFrame(flat_rows)
-    if "Plan ID" in df.columns: df = df.sort_values(by=["Plan ID", "Source File"])
+    if not df.empty and "Plan ID" in df.columns: 
+        df = df.sort_values(by=["Plan ID", "Source File"])
     
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name="Data Settings", index=False)
+        df.to_excel(writer, sheet_name="Protection Results", index=False)
     return output.getvalue()
