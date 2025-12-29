@@ -5,7 +5,6 @@ from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
-# [+] [INFO] Import common specifically for the new endpoint
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES, common
 import json
 import pandas as pd
@@ -68,7 +67,10 @@ def get_config_from_session(token: str) -> ProjectConfig:
 # --- NEW ENDPOINT: COMMON RUN ---
 
 @router.post("/common/run")
-async def run_common_parameters(token: str = Depends(get_current_token)):
+async def run_common_parameters(
+    include_data: bool = Query(False, description="Set to True to see raw data (si2s dump and raw ETAP rows)"),
+    token: str = Depends(get_current_token)
+):
     """
     Executes the 'Common' analysis (Electrical Parameters, Inrush, Topology) for all plans.
     Does NOT run specific ANSI codes (50/51/67), only gathers base data.
@@ -87,7 +89,6 @@ async def run_common_parameters(token: str = Depends(get_current_token)):
         if not dfs: continue
         
         # [context:flow] Resolve topology per file to avoid conflicts
-        # Use deepcopy to ensure we don't pollute the global config object during iteration
         file_config = copy.deepcopy(config)
         topology_manager.resolve_all(file_config, dfs)
         
@@ -96,6 +97,11 @@ async def run_common_parameters(token: str = Depends(get_current_token)):
                 # [decision:logic] Extract electrical params (In, Ik, Inrush) using common lib
                 data_settings = common.get_electrical_parameters(plan, file_config, dfs, global_tx_map)
                 
+                # [decision:logic] Filter raw data if not requested to keep response light
+                if not include_data:
+                    data_settings.pop("raw_data_from", None)
+                    data_settings.pop("raw_data_to", None)
+
                 # Basic status check
                 status = "ok"
                 if data_settings.get("kVnom_busfrom") == 0: status = "warning (kV=0)"
