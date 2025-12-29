@@ -2,13 +2,16 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
 class Std51Settings(BaseModel):
-    # [decision:logic] Updated to match config.json keys (factor_I1..I4)
+    # Factors (Seuils courants)
     factor_I1: float = 1.2
     factor_I2: float = 0.8
     factor_I3: float = 0.8
     factor_I4: float = 1.15
     
-    # Legacy/Internal defaults (kept for compatibility logic if needed later)
+    # Time Settings
+    time_dial_default: float = 0.5  # Ajout pour rendre le TMS configurable
+
+    # Legacy/Internal defaults
     selectivity_adder: float = 0.3
     backup_strategy: str = "REMOTE_FLOOR"
 
