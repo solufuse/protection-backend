@@ -1,12 +1,25 @@
 from pydantic import BaseModel
 from typing import Optional, List, Any
+from datetime import datetime
 
 class Std51Settings(BaseModel):
-    # Alignement exact sur ton config.json
     factor_I1: float = 1.2
     factor_I2: float = 0.8
     factor_I3: float = 0.8
     factor_I4: float = 1.15
+
+class TransformerData(BaseModel):
+    name: str
+    sn_kva: float
+    u_kv: float
+    ratio_iencl: float
+    tau_ms: float
+
+class LinkData(BaseModel):
+    id: str
+    length_km: float
+    impedance_zd: str
+    impedance_z0: str
 
 class GlobalSettings(BaseModel):
     std_51: Optional[Std51Settings] = None
@@ -24,7 +37,10 @@ class ProtectionPlan(BaseModel):
 class ProjectConfig(BaseModel):
     project_name: Optional[str] = None
     settings: Optional[GlobalSettings] = None
-    transformers: List[Any] = []
+    transformers: List[TransformerData] = []
     plans: List[ProtectionPlan] = []
-    loadflow_settings: Optional[Any] = None
-    links_data: List[Any] = []
+    links_data: List[LinkData] = []
+    standard: str = "IEC"
+    frequency: float = 50.0
+    # On peut laisser une référence générique ou la supprimer
+    loadflow_settings: Optional[Any] = None 

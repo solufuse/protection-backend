@@ -5,7 +5,7 @@ from app.core.security import get_current_token
 from app.services import session_manager
 from app.calculations import loadflow_calculator
 # MODIFICATION ICI: On importe depuis le schéma centralisé
-from app.schemas.protection import LoadFlowSettings 
+from app.schemas.loadflow_schema import LoadflowSettings 
 import json
 import pandas as pd
 import io
@@ -14,7 +14,7 @@ import zipfile
 # Define the router
 router = APIRouter(prefix="/loadflow", tags=["Loadflow Analysis"])
 
-def get_lf_config_from_session(token: str) -> LoadFlowSettings:
+def get_lf_config_from_session(token: str) -> LoadflowSettings:
     """
     Helper: Retrieves and parses 'config.json' from user session.
     """
@@ -35,7 +35,7 @@ def get_lf_config_from_session(token: str) -> LoadFlowSettings:
         data = json.loads(text_content)
         if "loadflow_settings" not in data: raise HTTPException(status_code=400, detail="Missing 'loadflow_settings'.")
         # Ensure we map dict correctly to the Pydantic model
-        return LoadFlowSettings(**data["loadflow_settings"])
+        return LoadflowSettings(**data["loadflow_settings"])
     except Exception as e: raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
 def _generate_excel_bytes(data: dict) -> bytes:
