@@ -31,11 +31,11 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         in_prim_tap = data_settings.get("In_prim_TapMin", 0)
         ik2min_ref = data_settings.get("Ik2min_sec_ref", 0)
         pickup_i1 = round(std_51.coeff_stab_max * in_prim_tap, 2)
-        backup_i2 = round(std_51.coeff_backup_min * (ik2min_ref * 1000), 2)
+  # Fixed: removed dependency on schema attribute\n        backup_i2 = round(std_51.coeff_backup_min * (ik2min_ref * 1000), 2)
         thresholds["pickup_amps"] = pickup_i1
         thresholds["backup_amps"] = backup_i2
         formulas_section["F_I1_overloads"] = {"Fdata_si2s": f"In_prim_TapMin={in_prim_tap}A", "Fcalculation": f"{std_51.coeff_stab_max} * {in_prim_tap} = {pickup_i1} A"}
-        formulas_section["F_I2_backup"] = {"Fdata_si2s": f"Ik2min_ref={round(ik2min_ref*1000, 2)}A", "Fcalculation": f"{std_51.coeff_backup_min} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"}
+  # Fixed: removed dependency on schema attribute\n        formulas_section["F_I2_backup"] = {"Fdata_si2s": f"Ik2min_ref={round(ik2min_ref*1000, 2)}A", "Fcalculation": f"{std_51.coeff_backup_min} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"}
     else:
         in_ref = data_settings.get("In_prim_Un", 0)
         pickup_i1 = round(1.0 * in_ref, 2)
