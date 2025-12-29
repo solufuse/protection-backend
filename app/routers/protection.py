@@ -4,7 +4,9 @@ from typing import Optional
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.schemas.protection import ProjectConfig
-from app.calculations import db_converter, topology_manager
+# MODIFICATION ICI: Import du nouveau converter au lieu de app.calculations.db_converter
+from app.converters import db_converter_si2s as db_converter 
+from app.calculations import topology_manager
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
 import json
 import pandas as pd
@@ -15,9 +17,6 @@ from app.routers import ansi_51 as ansi_51_router
 router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
 
 # --- INCLUSION DES SOUS-MODULES ---
-# Cela génère automatiquement les routes :
-# /protection/ansi_51/run
-# /protection/ansi_51/export
 router.include_router(ansi_51_router.router)
 
 # --- HELPERS (Utilisés pour le RUN GLOBAL) ---
@@ -32,7 +31,8 @@ def get_merged_dataframes_for_calc(token: str):
     merged_dfs = {}
     for name, content in files.items():
         if is_supported_protection(name):
-            dfs = db_converter.extract_data_from_db(content)
+            # Utilise maintenant la fonction dans app/converters/db_converter_si2s.py
+            dfs = db_converter.extract_data_from_si2s(content)
             if dfs:
                 for t, df in dfs.items():
                     if t not in merged_dfs: merged_dfs[t] = []
@@ -67,7 +67,6 @@ def get_config_from_session(token: str) -> ProjectConfig:
         raise HTTPException(status_code=422, detail=f"Invalid Config JSON: {e}")
 
 # --- GLOBAL RUN (L'Orchestrateur) ---
-# Cette route restera toujours là pour lancer TOUT d'un coup
 
 @router.post("/run")
 async def run_global_protection(token: str = Depends(get_current_token)):
@@ -76,6 +75,8 @@ async def run_global_protection(token: str = Depends(get_current_token)):
     """
     config = get_config_from_session(token)
     dfs_dict = get_merged_dataframes_for_calc(token)
+    
+    # Note: topology_manager devra aussi être adapté s'il dépend de l'ancien format
     config_updated = topology_manager.resolve_all(config, dfs_dict)
     
     global_results = []
@@ -84,12 +85,11 @@ async def run_global_protection(token: str = Depends(get_current_token)):
     for plan in config_updated.plans:
         plan_result = {"plan_id": plan.id, "ansi_results": {}}
         
-        # Pour chaque fonction activée (50, 51, etc.)
+        # Pour chaque fonction activée
         for func_code in plan.active_functions:
             if func_code in AVAILABLE_ANSI_MODULES:
                 module = AVAILABLE_ANSI_MODULES[func_code]
                 try:
-                    # Chaque module se débrouille avec son calcul
                     res = module.calculate(plan, config.settings, dfs_dict)
                     plan_result["ansi_results"][func_code] = res
                 except Exception as e:
@@ -111,7 +111,10 @@ def explore_data(
     for fname, content in files.items():
         if filename and filename.lower() not in fname.lower(): continue
         if not is_supported_protection(fname): continue
-        dfs = db_converter.extract_data_from_db(content)
+        
+        # Utilise la nouvelle fonction
+        dfs = db_converter.extract_data_from_si2s(content)
+        
         if dfs:
             file_results = {}
             for table_name, df in dfs.items():

@@ -1,39 +1,92 @@
 
-from app.schemas.protection import ProjectConfig
+import sqlite3
+import pandas as pd
+import tempfile
+import os
+import io
 from typing import Dict, Any, List
+from app.schemas.protection import ProjectConfig
+
+# --- LOGIQUE D'EXTRACTION FICHIER (Votre code original) ---
+
+def extract_data_from_si2s(file_content: bytes) -> Dict[str, pd.DataFrame]:
+    """
+    Extrait toutes les tables du SI2S (SQLite) et renvoie un dictionnaire de DataFrames.
+    """
+    # 1. Création d'un fichier temporaire car sqlite3 a besoin d'un chemin disque
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".SI2S") as tmp:
+        tmp.write(file_content)
+        tmp_path = tmp.name
+
+    data_frames = {}
+    
+    try:
+        # 2. Connexion à la base de données
+        conn = sqlite3.connect(tmp_path)
+        cursor = conn.cursor()
+        
+        # 3. Lister toutes les tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = [row[0] for row in cursor.fetchall()]
+        
+        # 4. Lire chaque table vers Pandas
+        for table in tables:
+            try:
+                df = pd.read_sql_query(f'SELECT * FROM "{table}"', conn)
+                data_frames[table] = df
+            except Exception as e:
+                print(f"Erreur lecture table {table}: {e}")
+                
+        conn.close()
+        
+    except Exception as e:
+        print(f"Erreur globale SQLite: {e}")
+        return {} # Retourne un dict vide en cas d'erreur
+        
+    finally:
+        # 5. Nettoyage (Suppression du fichier temp)
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+            
+    return data_frames
+
+def generate_excel_bytes(data_frames: dict) -> io.BytesIO:
+    """
+    Prend le dictionnaire de DataFrames et renvoie un fichier Excel en mémoire (BytesIO).
+    """
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        if not data_frames:
+            pd.DataFrame({'Info': ['Fichier Vide ou Illisible']}).to_excel(writer, sheet_name='Erreur')
+        else:
+            for table_name, df in data_frames.items():
+                sheet_name = table_name[:31]
+                count = 1
+                base_name = sheet_name
+                while sheet_name in writer.book.sheetnames:
+                    sheet_name = f"{base_name[:28]}_{count}"
+                    count += 1
+                df.to_excel(writer, sheet_name=sheet_name, index=False)
+    
+    output.seek(0)
+    return output
+
+# --- CLASS CONVERTER (Nouvelle Architecture) ---
 
 class ProtectionConverter:
     """
     Converter class dedicated to Protection & Short-Circuit (SI2S).
-    Extracts protection plans, CT ratios, and relay settings.
     """
-
     def __init__(self, config: ProjectConfig):
         self.config = config
 
     def get_protection_plans(self) -> List[Any]:
-        """
-        Returns the list of protection plans (relays) defined in the project.
-        """
         return self.config.plans
 
-    def get_global_settings(self) -> Dict[str, Any]:
-        """
-        Extracts global protection settings (e.g., ANSI 51 standard factors).
-        """
-        if not self.config.settings:
-            return {}
-        
-        # Return as dict for easier processing by the engine
-        return self.config.settings.model_dump() if hasattr(self.config.settings, 'model_dump') else self.config.settings.dict()
-
     def convert(self) -> Dict[str, Any]:
-        """
-        Main entry point to get the full dataset for the Protection engine.
-        """
         return {
-            "plans": self.get_protection_plans(),
-            "global_settings": self.get_global_settings(),
-            "transformers": self.config.transformers, # Transformers are needed for SC calculation too
+            "plans": self.config.plans,
+            "transformers": self.config.transformers,
             "project_name": self.config.project_name
         }
