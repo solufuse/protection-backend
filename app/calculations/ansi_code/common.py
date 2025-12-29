@@ -82,6 +82,8 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
     
     kvnom_busfrom = float(data_from.get("kVnom", 0) or 0)
     kvnom_busto = float(data_to.get("kVnom", 0) or 0)
+    
+    # Données Court-Circuit
     from_ikLL = float(data_from.get("IkLL", 0) or 0) 
     from_ikLG = float(data_from.get("IkLG", 0) or 0) 
     from_ik3ph = float(data_from.get("Ik3ph", 0) or 0)
@@ -94,6 +96,7 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
         "raw_data_from": data_from, "raw_data_to": data_to      
     }
     
+    # --- CAS 1 : TRANSFORMATEUR (Complexe) ---
     if plan.type.upper() == "TRANSFORMER":
         tx_id = plan.related_source if plan.related_source else plan.id.replace("CB_", "")
         tx_data_etap = global_tx_map.get(tx_id, {})
@@ -133,6 +136,26 @@ def get_electrical_parameters(plan: ProtectionPlan, full_config: ProjectConfig, 
             "inrush_50ms": round(inrush_val_50ms, 2), "inrush_50ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.05 / {tau_ms/1000})",
             "inrush_900ms": round(inrush_val_900ms, 2), "inrush_900ms_Formula": f"({round(in_prim,2)} * {ratio_iencl} / sqrt(2)) * exp(-0.9 / {tau_ms/1000})"
         })
+
+    # --- CAS 2 : COUPLAGE (Clean & Simple) ---
+    elif plan.type.upper() == "COUPLING":
+        ct_in = parse_ct_primary(plan.ct_primary)
+        
+        # Sur un couplage, la ref c'est le TC (qui représente la barre)
+        # On n'affiche PAS les liaisons ni les Inrushs (sauf cas rare, mais ici on simplifie)
+        
+        data_settings.update({
+            "status": "Computed (Based on Bus Capacity / CT)",
+            "In_prim_Un": ct_in,
+            "Note_Dimensionnement": "Basé sur le TC Primaire (Capacité Jeu de Barres)",
+            f"Ik2min_prim [IkLL] [{bus_amont}]": from_ikLL, 
+            f"Ik1min_prim [IkLG] [{bus_amont}]": from_ikLG,
+            # Pour la sélectivité, on garde les mêmes valeurs
+            "Ik2min_sec_ref": from_ikLL, 
+            "Ik3max_sec_ref": from_ik3ph
+        })
+
+    # --- CAS 3 : INCOMER / FEEDER (Somme Transfos + Liaison) ---
     else:
         ct_in = parse_ct_primary(plan.ct_primary)
         link_id = plan.related_source
