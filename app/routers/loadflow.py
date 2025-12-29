@@ -21,7 +21,8 @@ def is_supported_loadflow(fname: str) -> bool:
     """
     clean_name = fname.strip().lower()
     return clean_name.endswith('.lf1s') or clean_name.endswith('.l1fs') or clean_name.endswith('.mdb')
-    except Exception as e: raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f'Invalid config: {e}')
 
 def _generate_excel_bytes(data: dict) -> bytes:
     """
