@@ -58,7 +58,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             if "Ik2min_prim" in k and isinstance(v, (int, float)):
                 ik2min_prim = v; break
 
-        # I1
+        # I1 (THERMAL OVERLOAD)
         pickup_i1 = round(std_51.factor_I1 * in_prim_tap, 2)
         thresholds_structure["I1_overloads"] = {
             "I1_data_si2s": {
@@ -66,18 +66,20 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             },
             "I1_report": {
                 "pickup_amps": pickup_i1, "time_dial": std_51.time_dial_I1.value, "curve_type": std_51.time_dial_I1.curve,
-                "calculated_formula": f"{std_51.factor_I1} * {in_prim_tap} = {pickup_i1} A"
+                "calculated_formula": f"{std_51.factor_I1} * {in_prim_tap} = {pickup_i1} A",
+                "methodology_note": f"Surcharge Thermique : Calé à {int((std_51.factor_I1-1)*100)}% au-dessus du courant nominal max ({in_prim_tap}A) pour permettre l'exploitation tout en protégeant les enroulements."
             }
         }
 
-        # I2
+        # I2 (DISTANCE BACKUP)
         if ik2min_ref > 0:
             backup_i2 = round(std_51.factor_I2 * (ik2min_ref * 1000), 2)
             thresholds_structure["I2_backup"] = {
                 "I2_data_si2s": { "Ik2min_sec_ref_kA": ik2min_ref, "Backup_Factor": std_51.factor_I2 },
                 "I2_report": {
                     "pickup_amps": backup_i2, "time_dial": std_51.time_dial_I2.value, "curve_type": std_51.time_dial_I2.curve,
-                    "calculated_formula": f"{std_51.factor_I2} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"
+                    "calculated_formula": f"{std_51.factor_I2} * {round(ik2min_ref*1000, 2)} = {backup_i2} A",
+                    "methodology_note": f"Secours Distance : Réglé à {int(std_51.factor_I2*100)}% du court-circuit minimum en bout de ligne (Icc2min Sec = {round(ik2min_ref*1000, 2)}A) pour garantir la détection d'un défaut aval."
                 }
             }
             
@@ -98,7 +100,8 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "I1_data_si2s": { "In_Ref": in_ref },
             "I1_report": {
                 "pickup_amps": pickup_i1, "time_dial": std_51.time_dial_I1.value, "curve_type": std_51.time_dial_I1.curve,
-                "calculated_formula": f"{std_51.factor_I1} * {in_ref} = {pickup_i1} A"
+                "calculated_formula": f"{std_51.factor_I1} * {in_ref} = {pickup_i1} A",
+                "methodology_note": f"Standard : Réglé par rapport au courant nominal ou au TC ({in_ref}A)."
             }
         }
         i4_data_context = {"CT_Primary": ct_prim_val}
@@ -107,19 +110,21 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
     if std_51.factor_I4 > 2.0: 
         highset_i4 = round(std_51.factor_I4 * ct_prim_val, 2)
         
-        # Check simple de cohérence (optionnel, pour info)
-        status_i4 = "OK"
+        # Methodology text construction
+        meth_text = "Instantané (High-Set) basé sur le TC."
         if ptype == "TRANSFORMER":
-            lim_low = max(i4_data_context.get("Limit_Low_Inrush_50ms", 0), i4_data_context.get("Limit_Low_IkSec_Max", 0))
-            if highset_i4 < lim_low: status_i4 = "WARNING: I4 < Inrush/IkSec"
-        
-        i4_data_context["Check_Status"] = status_i4
+            meth_text = "Sélectivité Ampèremétrique : Le seuil doit être supérieur à l'Inrush ({}A) et au court-circuit max aval ({}A) pour éviter les déclenchements intempestifs, tout en restant inférieur au court-circuit min amont ({}A).".format(
+                i4_data_context.get("Limit_Low_Inrush_50ms"),
+                i4_data_context.get("Limit_Low_IkSec_Max"),
+                i4_data_context.get("Limit_High_IkPrim_Min")
+            )
 
         thresholds_structure["I4_highset"] = {
             "I4_data": i4_data_context,
             "I4_report": {
                 "pickup_amps": highset_i4, "time_dial": std_51.time_dial_I4.value, "curve_type": std_51.time_dial_I4.curve,
-                "calculated_formula": f"{std_51.factor_I4} * {ct_prim_val} (CT) = {highset_i4} A"
+                "calculated_formula": f"{std_51.factor_I4} * {ct_prim_val} (CT) = {highset_i4} A",
+                "methodology_note": meth_text
             }
         }
 
@@ -188,6 +193,7 @@ def generate_excel(results: List[dict]) -> bytes:
                 row[f"{prefix}_Time"] = rep.get("time_dial")
                 row[f"{prefix}_Curve"] = rep.get("curve_type")
                 row[f"{prefix}_Formula"] = rep.get("calculated_formula")
+                row[f"{prefix}_Note"] = rep.get("methodology_note") # [+] NEW FIELD
 
         add_th("I1_overloads", "I1")
         add_th("I2_backup", "I2")
@@ -205,6 +211,6 @@ def generate_excel(results: List[dict]) -> bytes:
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name="Protection Data", index=False)
         for col in writer.sheets["Protection Data"].columns:
-            try: writer.sheets["Protection Data"].column_dimensions[col[0].column_letter].width = 18
+            try: writer.sheets["Protection Data"].column_dimensions[col[0].column_letter].width = 25
             except: pass
     return output.getvalue()
