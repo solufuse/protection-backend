@@ -37,6 +37,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         # --- I1 (OVERLOAD) ---
         pickup_i1 = round(std_51.factor_I1 * in_prim_tap, 2)
         
+        # [decision:logic] Accessing .value for numeric TMS, and .curve for metadata
         thresholds_structure["I1_overloads"] = {
             "I1_data_si2s": {
                 "mva_tx": mva_tx,
@@ -46,7 +47,8 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             },
             "I1_report": {
                 "pickup_amps": pickup_i1,
-                "time_dial": std_51.time_dial_I1, # [!] Specific I1 Dial
+                "time_dial": std_51.time_dial_I1.value, 
+                "curve_type": std_51.time_dial_I1.curve, # [+] Added Curve info
                 "equation_logic": f"Factor_I1 ({std_51.factor_I1}) * In_prim_TapMin",
                 "calculated_formula": f"{std_51.factor_I1} * {in_prim_tap} = {pickup_i1} A"
             }
@@ -62,7 +64,8 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             },
             "I2_report": {
                 "pickup_amps": backup_i2,
-                "time_dial": std_51.time_dial_I2, # [!] Specific I2 Dial
+                "time_dial": std_51.time_dial_I2.value,
+                "curve_type": std_51.time_dial_I2.curve, # [+] Added Curve info
                 "equation_logic": f"Factor_I2 ({std_51.factor_I2}) * Ik2min_sec_ref",
                 "calculated_formula": f"{std_51.factor_I2} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"
             }
@@ -77,7 +80,8 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "I1_data_si2s": { "In_Ref": in_ref },
             "I1_report": {
                 "pickup_amps": pickup_i1,
-                "time_dial": std_51.time_dial_I1, # Use I1 by default for main threshold
+                "time_dial": std_51.time_dial_I1.value,
+                "curve_type": std_51.time_dial_I1.curve,
                 "equation_logic": "1.0 * In_Ref",
                 "calculated_formula": f"1.0 * {in_ref} = {pickup_i1} A"
             }
@@ -169,15 +173,17 @@ def generate_excel(results: List[dict]) -> bytes:
         i1 = thresholds.get("I1_overloads", {}).get("I1_report", {})
         row["I1_Pickup"] = i1.get("pickup_amps")
         row["I1_TimeDial"] = i1.get("time_dial")
+        row["I1_Curve"] = i1.get("curve_type") # [+] Added to Excel
         row["I1_Formula"] = i1.get("calculated_formula")
         
         # I2
         i2 = thresholds.get("I2_backup", {}).get("I2_report", {})
         row["I2_Pickup"] = i2.get("pickup_amps")
         row["I2_TimeDial"] = i2.get("time_dial")
+        row["I2_Curve"] = i2.get("curve_type") # [+] Added to Excel
         row["I2_Formula"] = i2.get("calculated_formula")
 
-        # Electrical Data (Flattened)
+        # Electrical Data
         ds = res.get("global_electrical_data", {})
         ds_clean = {k: v for k, v in ds.items() if k not in ["raw_data_from", "raw_data_to"]}
         flat_ds = flatten_dict(ds_clean, parent_key="DS")
@@ -194,4 +200,9 @@ def generate_excel(results: List[dict]) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name="Protection Data", index=False)
+        # Auto-adjust width
+        for col in writer.sheets["Protection Data"].columns:
+            try: writer.sheets["Protection Data"].column_dimensions[col[0].column_letter].width = 18
+            except: pass
+
     return output.getvalue()

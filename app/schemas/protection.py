@@ -1,5 +1,11 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
+
+# New sub-model for Time Dial details
+class TimeDialConfig(BaseModel):
+    value: float = Field(0.5, description="The numerical Time Multiplier Setting (TMS).")
+    curve: str = Field("IEC-S", description="Curve type: VIT, SIT, EIT, DT (Definite Time), etc.")
+    comment: Optional[str] = Field(None, description="User comments for documentation.")
 
 class Std51Settings(BaseModel):
     # Factors (Seuils courants)
@@ -8,11 +14,11 @@ class Std51Settings(BaseModel):
     factor_I3: float = 0.8
     factor_I4: float = 1.15
     
-    # Time Settings (Specific per threshold)
-    time_dial_I1: float = 0.5
-    time_dial_I2: float = 0.1  # Souvent plus rapide pour le court-circuit
-    time_dial_I3: float = 0.1
-    time_dial_I4: float = 0.1
+    # Time Settings (Rich Objects)
+    time_dial_I1: TimeDialConfig = TimeDialConfig(value=0.5, curve="VIT")
+    time_dial_I2: TimeDialConfig = TimeDialConfig(value=0.1, curve="DT")
+    time_dial_I3: TimeDialConfig = TimeDialConfig(value=0.1, curve="DT")
+    time_dial_I4: TimeDialConfig = TimeDialConfig(value=0.1, curve="DT")
     
     # Legacy/Internal defaults
     selectivity_adder: float = 0.3
