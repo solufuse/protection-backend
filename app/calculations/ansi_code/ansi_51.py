@@ -8,6 +8,7 @@ import io
 import copy
 from typing import List, Dict, Any
 import traceback
+import re
 
 def flatten_dict(d: Dict, parent_key: str = '', sep: str = '_') -> Dict:
     items = []
@@ -17,73 +18,73 @@ def flatten_dict(d: Dict, parent_key: str = '', sep: str = '_') -> Dict:
         else: items.append((new_key, v))
     return dict(items)
 
+def parse_ct_value(ct_str: str) -> float:
+    try:
+        # Extrait "400" de "CT 400/1 A"
+        match = re.search(r"(\d+)", str(ct_str))
+        return float(match.group(1)) if match else 0.0
+    except: return 0.0
+
 def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> dict:
     settings = full_config.settings
     std_51 = settings.std_51
     
-    # [decision:logic] EXECUTE COMMON SCRIPT LOGIC
-    # This extracts In, Ik, Inrush, etc. using the shared 'common' library
+    # 1. Electrical Data
     common_data = common.get_electrical_parameters(plan, full_config, dfs_dict, global_tx_map)
     
     thresholds_structure = {}
     
-    if plan.type.upper() == "TRANSFORMER":
-        # --- DATA EXTRACTION FROM COMMON ---
-        in_prim_tap = common_data.get("In_prim_TapMin", 0)
-        ik2min_ref = common_data.get("Ik2min_sec_ref", 0)
-        mva_tx = common_data.get("mva_tx [MVA]", 0)
-        min_tap = common_data.get("Min%Tap_val [Min%Tap]", 0)
-        inrush_900 = common_data.get("inrush_900ms", 0)
-
-        # --- I1 (OVERLOAD) ---
-        pickup_i1 = round(std_51.factor_I1 * in_prim_tap, 2)
-        
-        thresholds_structure["I1_overloads"] = {
-            "I1_data_si2s": {
-                "mva_tx": mva_tx,
-                "Min_Tap_Percent": min_tap,
-                "In_prim_TapMin": in_prim_tap,
-                "inrush_900ms": inrush_900
-            },
-            "I1_report": {
-                "pickup_amps": pickup_i1,
-                "time_dial": std_51.time_dial_I1.value, 
-                "curve_type": std_51.time_dial_I1.curve,
-                "equation_logic": f"Factor_I1 ({std_51.factor_I1}) * In_prim_TapMin",
-                "calculated_formula": f"{std_51.factor_I1} * {in_prim_tap} = {pickup_i1} A"
-            }
+    # Base currents
+    in_prim_tap = common_data.get("In_prim_TapMin", 0)
+    ik2min_ref = common_data.get("Ik2min_sec_ref", 0)
+    ct_prim_val = parse_ct_value(plan.ct_primary)
+    
+    # --- I1 (OVERLOAD - THERMAL) ---
+    # Base: In_prim_TapMin (Capacity)
+    pickup_i1 = round(std_51.factor_I1 * in_prim_tap, 2)
+    thresholds_structure["I1_overloads"] = {
+        "I1_report": {
+            "pickup_amps": pickup_i1,
+            "time_dial": std_51.time_dial_I1.value, 
+            "curve_type": std_51.time_dial_I1.curve,
+            "calculated_formula": f"{std_51.factor_I1} * {in_prim_tap} = {pickup_i1} A"
         }
+    }
 
-        # --- I2 (BACKUP) ---
+    # --- I2 (BACKUP - DISTANCE) ---
+    # Base: Ik2min_sec_ref (Fault at end of line)
+    # Note: Only relevant if we have short-circuit data (Transformers/Feeders)
+    if ik2min_ref > 0:
         backup_i2 = round(std_51.factor_I2 * (ik2min_ref * 1000), 2)
-        
         thresholds_structure["I2_backup"] = {
-            "I2_data_si2s": {
-                "Ik2min_sec_ref_kA": ik2min_ref,
-                "Backup_Factor": std_51.factor_I2
-            },
             "I2_report": {
                 "pickup_amps": backup_i2,
                 "time_dial": std_51.time_dial_I2.value,
                 "curve_type": std_51.time_dial_I2.curve,
-                "equation_logic": f"Factor_I2 ({std_51.factor_I2}) * Ik2min_sec_ref",
                 "calculated_formula": f"{std_51.factor_I2} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"
             }
         }
+    
+    # --- I3 (INTERMEDIATE) ---
+    # Base: Configurable (User Choice). Let's default to In_prim logic for now or specific
+    # For now, disable if factor is default 0.8 (same as I2) to avoid duplicates, 
+    # unless specifically configured differently.
+    # Let's say I3 is typically 0.8 * Ik2min_prim (Local Backup)? 
+    # For simplicity, we skip specific I3 logic unless requested, or mirror I2 logic.
+    pass 
 
-    else:
-        # --- CAS HORS TRANSFO (Incomer / Coupling) ---
-        in_ref = common_data.get("In_prim_Un", 0)
-        pickup_i1 = round(1.0 * in_ref, 2)
-        
-        thresholds_structure["I1_overloads"] = {
-            "I1_data_si2s": { "In_Ref": in_ref },
-            "I1_report": {
-                "pickup_amps": pickup_i1,
-                "time_dial": std_51.time_dial_I1.value,
-                "curve_type": std_51.time_dial_I1.curve,
-                "equation_logic": "1.0 * In_Ref",
-                "calculated_formula": f"1.0 * {in_ref} = {pickup_i1} A"
+    # --- I4 (HIGH SET - INSTANTANEOUS) ---
+    # Base: CT Primary (Robustness) or In_prim
+    # Schneider Logic: 7 * InTC. We use Factor * CT.
+    if std_51.factor_I4 > 2.0: # Only activate if factor looks like a High Set (> 2x)
+        highset_i4 = round(std_51.factor_I4 * ct_prim_val, 2)
+        thresholds_structure["I4_highset"] = {
+            "I4_data": {"CT_Primary": ct_prim_val},
+            "I4_report": {
+                "pickup_amps": highset_i4,
+                "time_dial": std_51.time_dial_I4.value,
+                "curve_type": std_51.time_dial_I4.curve,
+                "calculated_formula": f"{std_51.factor_I4} * {ct_prim_val} (CT) = {highset_i4} A"
             }
         }
 
@@ -107,7 +108,6 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "ct_primary": plan.ct_primary 
         },
         "thresholds": thresholds_structure,
-        # [!] KEY RENAMED TO 'common_data' TO MATCH /protection/common/run
         "common_data": common_data, 
         "comments": []
     }
@@ -132,14 +132,11 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
         for plan in file_config.plans:
             try:
                 res = calculate(plan, file_config, dfs, global_tx_map)
-                
                 if res.get("status", "").startswith("error"):
-                    results.append(res)
-                    continue
+                    results.append(res); continue
                 
                 ds = res.get("common_data", {})
-                if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: 
-                    continue 
+                if ds.get("kVnom_busfrom", 0) == 0 and ds.get("kVnom", 0) == 0: continue 
                 
                 res["plan_id"] = plan.id
                 res["plan_type"] = plan.type
@@ -147,12 +144,7 @@ def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
                 results.append(res)
             except Exception as e:
                 traceback.print_exc()
-                results.append({
-                    "plan_id": plan.id, 
-                    "source_file": filename, 
-                    "status": "CRASH", 
-                    "comments": [f"Error: {str(e)}"]
-                })
+                results.append({"plan_id": plan.id, "source_file": filename, "status": "CRASH", "comments": [f"Error: {str(e)}"]})
     return results
 
 def generate_excel(results: List[dict]) -> bytes:
@@ -164,35 +156,29 @@ def generate_excel(results: List[dict]) -> bytes:
             "Plan ID": res.get("plan_id"),
             "Type": res.get("plan_type"),
             "Status": res.get("status"),
-            "Topo_Origin": topo.get("origin"),
-            "Topo_BusFrom": topo.get("bus_from")
+            "Topo_Origin": topo.get("origin")
         }
         
         thresholds = res.get("thresholds", {})
         
-        # I1
-        i1 = thresholds.get("I1_overloads", {}).get("I1_report", {})
-        row["I1_Pickup"] = i1.get("pickup_amps")
-        row["I1_TimeDial"] = i1.get("time_dial")
-        row["I1_Curve"] = i1.get("curve_type")
-        row["I1_Formula"] = i1.get("calculated_formula")
-        
-        # I2
-        i2 = thresholds.get("I2_backup", {}).get("I2_report", {})
-        row["I2_Pickup"] = i2.get("pickup_amps")
-        row["I2_TimeDial"] = i2.get("time_dial")
-        row["I2_Curve"] = i2.get("curve_type")
-        row["I2_Formula"] = i2.get("calculated_formula")
+        # Helper to extract report
+        def add_th(key, prefix):
+            rep = thresholds.get(key, {}).get(f"{prefix}_report", {})
+            if rep:
+                row[f"{prefix}_Pickup"] = rep.get("pickup_amps")
+                row[f"{prefix}_Time"] = rep.get("time_dial")
+                row[f"{prefix}_Curve"] = rep.get("curve_type")
+                row[f"{prefix}_Formula"] = rep.get("calculated_formula")
 
-        # Electrical Data (From common_data)
+        add_th("I1_overloads", "I1")
+        add_th("I2_backup", "I2")
+        add_th("I4_highset", "I4") # Added I4
+
         ds = res.get("common_data", {})
         ds_clean = {k: v for k, v in ds.items() if k not in ["raw_data_from", "raw_data_to"]}
         flat_ds = flatten_dict(ds_clean, parent_key="DS")
         row.update(flat_ds)
         
-        if "comments" in res and res["comments"]:
-            row["Error_Logs"] = str(res["comments"])
-
         flat_rows.append(row)
     
     df = pd.DataFrame(flat_rows)
