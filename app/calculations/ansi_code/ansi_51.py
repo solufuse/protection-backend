@@ -26,7 +26,7 @@ def parse_ct_value(ct_str: str) -> float:
 
 def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, global_tx_map: dict) -> dict:
     
-    # [decision:logic] Select the specific settings based on Plan Type
+    # 1. Select Settings by Type
     ptype = plan.type.upper()
     if ptype == "TRANSFORMER":
         std_51 = full_config.settings.ansi_51.transformer
@@ -35,10 +35,9 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
     elif ptype == "COUPLING":
         std_51 = full_config.settings.ansi_51.coupling
     else:
-        # Fallback to transformer settings or generic default if unknown
         std_51 = full_config.settings.ansi_51.transformer
 
-    # 1. Electrical Data
+    # 2. Electrical Data (Common)
     common_data = common.get_electrical_parameters(plan, full_config, dfs_dict, global_tx_map)
     thresholds_structure = {}
     ct_prim_val = parse_ct_value(plan.ct_primary)
@@ -50,6 +49,14 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         mva_tx = common_data.get("mva_tx [MVA]", 0)
         min_tap = common_data.get("Min%Tap_val [Min%Tap]", 0)
         inrush_900 = common_data.get("inrush_900ms", 0)
+        inrush_50 = common_data.get("inrush_50ms", 0)
+        ik3max_sec_ref = common_data.get("Ik3max_sec_ref", 0)
+        
+        # Chercher Ik2min_prim de manière dynamique
+        ik2min_prim = 0
+        for k, v in common_data.items():
+            if "Ik2min_prim" in k and isinstance(v, (int, float)):
+                ik2min_prim = v; break
 
         # I1
         pickup_i1 = round(std_51.factor_I1 * in_prim_tap, 2)
@@ -73,13 +80,18 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
                     "calculated_formula": f"{std_51.factor_I2} * {round(ik2min_ref*1000, 2)} = {backup_i2} A"
                 }
             }
-
-    # --- LOGIQUE GENERIQUE (Incomer / Coupling) ---
-    else:
-        in_ref = common_data.get("In_prim_Un", 0)
-        # Fallback if 0: use CT
-        if in_ref == 0: in_ref = ct_prim_val
             
+        # I4 Data Context (Specific for Transformer)
+        i4_data_context = {
+            "CT_Primary": ct_prim_val,
+            "Limit_Low_Inrush_50ms": inrush_50,
+            "Limit_Low_IkSec_Max": round(ik3max_sec_ref * 1000, 2) if ik3max_sec_ref else 0,
+            "Limit_High_IkPrim_Min": round(ik2min_prim, 2)
+        }
+
+    # --- LOGIQUE GENERIQUE ---
+    else:
+        in_ref = common_data.get("In_prim_Un", 0) or ct_prim_val
         pickup_i1 = round(std_51.factor_I1 * in_ref, 2)
         
         thresholds_structure["I1_overloads"] = {
@@ -89,12 +101,22 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
                 "calculated_formula": f"{std_51.factor_I1} * {in_ref} = {pickup_i1} A"
             }
         }
+        i4_data_context = {"CT_Primary": ct_prim_val}
 
     # --- I4 (HIGH SET) ---
     if std_51.factor_I4 > 2.0: 
         highset_i4 = round(std_51.factor_I4 * ct_prim_val, 2)
+        
+        # Check simple de cohérence (optionnel, pour info)
+        status_i4 = "OK"
+        if ptype == "TRANSFORMER":
+            lim_low = max(i4_data_context.get("Limit_Low_Inrush_50ms", 0), i4_data_context.get("Limit_Low_IkSec_Max", 0))
+            if highset_i4 < lim_low: status_i4 = "WARNING: I4 < Inrush/IkSec"
+        
+        i4_data_context["Check_Status"] = status_i4
+
         thresholds_structure["I4_highset"] = {
-            "I4_data": {"CT_Primary": ct_prim_val},
+            "I4_data": i4_data_context,
             "I4_report": {
                 "pickup_amps": highset_i4, "time_dial": std_51.time_dial_I4.value, "curve_type": std_51.time_dial_I4.curve,
                 "calculated_formula": f"{std_51.factor_I4} * {ct_prim_val} (CT) = {highset_i4} A"
@@ -113,7 +135,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
             "bus_to": common_data.get("Bus_Sec")
         },
         "config": { 
-            "settings_used": std_51.dict(), # Traceability of settings used
+            "settings_used": std_51.dict(), 
             "type": plan.type, 
             "ct_primary": plan.ct_primary 
         },
