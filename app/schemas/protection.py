@@ -1,6 +1,19 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from datetime import datetime
+
+# --- CONFIGURATION SCHEMAS ---
+
+# Schema for project-wide protection configuration
+# This satisfies the 'from app.schemas.protection import ProjectConfig' requirement
+class ProjectConfig(BaseModel):
+    project_id: Optional[str] = None
+    standard: str = "IEC"  # Default to IEC, could be ANSI
+    frequency: float = 50.0
+    settings: Optional[Dict[str, Any]] = {}
+    description: Optional[str] = None
+
+# --- PROTECTION OBJECT SCHEMAS ---
 
 # Base schema with shared attributes
 class ProtectionBase(BaseModel):
