@@ -1,45 +1,52 @@
+
 from pydantic import BaseModel
-from typing import Optional, List, Any
-from datetime import datetime
+from typing import List, Optional, Dict, Any
 
 class Std51Settings(BaseModel):
-    factor_I1: float = 1.2
-    factor_I2: float = 0.8
-    factor_I3: float = 0.8
-    factor_I4: float = 1.15
+    coeff_stab_max: float = 1.2
+    coeff_backup_min: float = 0.8
+    coeff_sensibilite: float = 0.8
+    coeff_inrush_margin: float = 1.15
+    selectivity_adder: float = 0.3
+    backup_strategy: str = "REMOTE_FLOOR"
 
-class TransformerData(BaseModel):
+class GlobalSettings(BaseModel):
+    std_51: Std51Settings = Std51Settings()
+
+class TransformerConfig(BaseModel):
     name: str
-    sn_kva: float
-    u_kv: float
-    ratio_iencl: float
-    tau_ms: float
+    desc: Optional[str] = None
+    ratio_iencl: float = 8.0
+    tau_ms: float = 100.0
 
 class LinkData(BaseModel):
     id: str
-    length_km: float
-    impedance_zd: str
-    impedance_z0: str
-
-class GlobalSettings(BaseModel):
-    std_51: Optional[Std51Settings] = None
+    length_km: float = 0.0
+    impedance_zd: str = "0+j0"
+    impedance_z0: str = "0+j0"
 
 class ProtectionPlan(BaseModel):
     id: str
-    title: str
     type: str
-    ct_primary: Optional[str] = None
+    
+    bus_from: Optional[str] = None 
+    bus_to: Optional[str] = None
+    
+    ct_primary: str = "CT 100/1 A"
     related_source: Optional[str] = None
     active_functions: List[str] = []
-    bus_from: Optional[str] = None
-    bus_to: Optional[str] = None
+    
+    # Champs internes
+    topology_origin: Optional[str] = None
+    debug_info: Optional[str] = None
+    meta_data: Optional[Dict[str, Any]] = None # <--- Pour supporter ton code
+
+    # BLINDAGE : Autorise tout champ supplémentaire
+    class Config:
+        extra = "allow" 
 
 class ProjectConfig(BaseModel):
-    project_name: Optional[str] = None
-    settings: Optional[GlobalSettings] = None
-    transformers: List[TransformerData] = []
+    settings: GlobalSettings = GlobalSettings()
+    transformers: List[TransformerConfig] = []
+    links_data: List[LinkData] = []
     plans: List[ProtectionPlan] = []
-    links_data: List[LinkData] = []  # Restored field
-    standard: str = "IEC"
-    frequency: float = 50.0
-    loadflow_settings: Optional[Any] = None
