@@ -11,16 +11,10 @@ class LoadflowSettings(BaseModel):
     tap_transformers_ids: List[str] = Field(default_factory=list, description="Deprecated. The script now auto-scans all transformers.")
 
 class SwingBusInfo(BaseModel):
-    """
-    Details about the Swing Bus identification process.
-    """
     config: Optional[str] = Field(None, description="The Swing Bus name requested in the configuration.")
     script: Optional[str] = Field(None, description="The Swing Bus name actually found and used in the file.")
 
 class StudyCaseInfo(BaseModel):
-    """
-    Metadata extracted from the 'ILFStudyCase' table to identify the scenario.
-    """
     id: Optional[str] = Field(None, description="Study Case ID (e.g., 'LF_198').")
     config: Optional[str] = Field(None, description="Configuration name (e.g., 'Normal').")
     revision: Optional[str] = Field(None, description="Revision name (e.g., 'CH199').")
@@ -28,19 +22,22 @@ class StudyCaseInfo(BaseModel):
 class TransformerData(BaseModel):
     """
     Electrical data extracted for a specific transformer.
+    Aliases are used to match the 'Real Names' in the output JSON.
     """
-    tap: Optional[float] = Field(None, description="Tap position.")
-    mw: Optional[float] = Field(None, description="Active Power flow (MW).")
-    mvar: Optional[float] = Field(None, description="Reactive Power flow (Mvar).")
-    amp: Optional[float] = Field(None, description="Current flow (Amp).")
-    kv: Optional[float] = Field(None, description="Voltage level (kV).")
-    volt_mag: Optional[float] = Field(None, description="Voltage Magnitude (%).")
-    pf: Optional[float] = Field(None, description="Power Factor (%).")
+    tap: Optional[float] = Field(None, alias="Tap", description="Tap position.")
+    mw: Optional[float] = Field(None, alias="LFMW", description="Active Power flow (MW).")
+    mvar: Optional[float] = Field(None, alias="LFMvar", description="Reactive Power flow (Mvar).")
+    amp: Optional[float] = Field(None, alias="LFAmp", description="Current flow (Amp).")
+    kv: Optional[float] = Field(None, alias="kV", description="Voltage level (kV).")
+    volt_mag: Optional[float] = Field(None, alias="VoltMag", description="Voltage Magnitude (%).")
+    pf: Optional[float] = Field(None, alias="LFPF", description="Power Factor (%).")
+
+    class Config:
+        # Permet d'utiliser data.tap = ... dans le code python tout en sortant "Tap" en JSON
+        populate_by_name = True
+        allow_population_by_field_name = True
 
 class LoadflowResultFile(BaseModel):
-    """
-    Analysis result for a single uploaded file.
-    """
     filename: str = Field(..., description="Name of the analyzed file.")
     is_valid: bool = Field(False, description="True if the file could be parsed successfully.")
     
@@ -50,7 +47,8 @@ class LoadflowResultFile(BaseModel):
     mw_flow: Optional[float] = Field(None, description="Active Power measured at the Swing Bus.")
     mvar_flow: Optional[float] = Field(None, description="Reactive Power measured at the Swing Bus.")
     
-    transformers: Dict[str, TransformerData] = Field({}, description="Dictionary of transformers found (Key: Transfo ID).")
+    # On utilise Dict[str, Any] pour accepter le dictionnaire déjà converti avec les Alias
+    transformers: Dict[str, Any] = Field({}, description="Dictionary of transformers found (Key: Transfo ID).")
     
     delta_target: Optional[float] = Field(None, description="Absolute difference between measured MW and target MW.")
     
@@ -59,9 +57,6 @@ class LoadflowResultFile(BaseModel):
     status_color: str = Field("red", description="Visual indicator: 'green' (in tolerance), 'orange' (close), 'red' (far).")
 
 class LoadflowResponse(BaseModel):
-    """
-    Global response object for the Loadflow Analysis endpoint.
-    """
     status: str = Field(..., description="Execution status ('success' or 'error').")
     best_file: Optional[str] = Field(None, description="Filename of the overall best file (Legacy field).")
     results: List[LoadflowResultFile] = Field(..., description="List of results for all analyzed files.")

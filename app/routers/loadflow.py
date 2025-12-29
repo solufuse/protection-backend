@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.encoders import jsonable_encoder # [+] [INFO] Fix for correct JSON dumping
 from app.core.security import get_current_token
 from app.services import session_manager
 from app.calculations import loadflow_calculator
@@ -15,16 +16,10 @@ router = APIRouter(prefix="/loadflow", tags=["Loadflow Analysis"])
 # --- HELPERS ---
 
 def is_supported_loadflow(fname: str) -> bool:
-    """
-    Check if the file is a valid Loadflow source (.lf1s or .mdb).
-    """
     e = fname.lower()
     return e.endswith('.lf1s') or e.endswith('.mdb') or e.endswith('.si2s')
 
 def get_lf_config_from_session(token: str) -> LoadflowSettings:
-    """
-    Helper: Retrieves and parses 'config.json' from user session.
-    """
     files = session_manager.get_files(token)
     if not files: raise HTTPException(status_code=400, detail="Session empty.")
     
@@ -45,9 +40,6 @@ def get_lf_config_from_session(token: str) -> LoadflowSettings:
     except Exception as e: raise HTTPException(status_code=422, detail=f"Invalid config: {e}")
 
 def _generate_excel_bytes(data: dict) -> bytes:
-    """
-    Internal helper: Transforms the analysis data into an Excel file (bytes).
-    """
     results = data.get("results", [])
     flat_rows = []
 
@@ -71,15 +63,36 @@ def _generate_excel_bytes(data: dict) -> bytes:
         else:
             for tx_id, tx_data in transformers.items():
                 row = base_info.copy()
+                
+                # Check if tx_data is dict (from new calculator) or object
+                if isinstance(tx_data, dict):
+                    # Use keys from Aliases
+                    tap_val = tx_data.get("Tap")
+                    mw_val = tx_data.get("LFMW")
+                    mvar_val = tx_data.get("LFMvar")
+                    amp_val = tx_data.get("LFAmp")
+                    kv_val = tx_data.get("kV")
+                    volt_val = tx_data.get("VoltMag")
+                    pf_val = tx_data.get("LFPF")
+                else:
+                    # Fallback (old object style)
+                    tap_val = getattr(tx_data, "tap", None)
+                    mw_val = getattr(tx_data, "mw", None)
+                    mvar_val = getattr(tx_data, "mvar", None)
+                    amp_val = getattr(tx_data, "amp", None)
+                    kv_val = getattr(tx_data, "kv", None)
+                    volt_val = getattr(tx_data, "volt_mag", None)
+                    pf_val = getattr(tx_data, "pf", None)
+
                 row.update({
                     "Transfo ID": tx_id,
-                    "Tap": getattr(tx_data, "tap", None),
-                    "MW (Tx)": getattr(tx_data, "mw", None),
-                    "Mvar (Tx)": getattr(tx_data, "mvar", None),
-                    "Amp (A)": getattr(tx_data, "amp", None),
-                    "kV": getattr(tx_data, "kv", None),
-                    "Volt Mag": getattr(tx_data, "volt_mag", None),
-                    "PF": getattr(tx_data, "pf", None)
+                    "Tap": tap_val,
+                    "MW (Tx)": mw_val,
+                    "Mvar (Tx)": mvar_val,
+                    "Amp (A)": amp_val,
+                    "kV": kv_val,
+                    "Volt Mag": volt_val,
+                    "PF": pf_val
                 })
                 flat_rows.append(row)
 
@@ -113,12 +126,8 @@ async def run_loadflow_session(
     format: str = Query("json", pattern="^(xlsx|json)$"), 
     token: str = Depends(get_current_token)
 ):
-    """
-    Run Loadflow Analysis on ALL files. Returns JSON or downloads XLSX.
-    """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
-    # Filter only supported files before calc if needed, though calculator handles it
     data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
     
     if format == "xlsx":
@@ -131,9 +140,6 @@ async def run_loadflow_winners_only(
     format: str = Query("json", pattern="^(xlsx|json)$"), 
     token: str = Depends(get_current_token)
 ):
-    """
-    Run Loadflow Analysis returning ONLY winning files.
-    """
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     data = loadflow_calculator.analyze_loadflow(files, config, only_winners=True)
@@ -145,23 +151,19 @@ async def run_loadflow_winners_only(
 
 @router.post("/run-and-save")
 async def run_and_save_loadflow(
-    basename: str = Query("loadflow_results", description="Base name for the output files (without extension)"),
+    basename: str = Query("loadflow_results", description="Base name for the output files"),
     token: str = Depends(get_current_token)
 ):
-    """
-    Runs the Loadflow Analysis (on all files) and saves BOTH JSON and XLSX results
-    directly into the user's storage folder (/app/storage/{uid}/).
-    """
-    # 1. Retrieve configuration and files from session
     config = get_lf_config_from_session(token)
     files = session_manager.get_files(token)
     
-    # 2. Run the calculation logic
     data = loadflow_calculator.analyze_loadflow(files, config, only_winners=False)
     
     # 3. Save JSON File
+    # [!] [CRITICAL] Use jsonable_encoder to handle Pydantic/Dict objects properly before dumping
+    json_content = jsonable_encoder(data)
     json_filename = f"{basename}.json"
-    json_bytes = json.dumps(data, indent=2, default=str).encode('utf-8')
+    json_bytes = json.dumps(json_content, indent=2, default=str).encode('utf-8')
     session_manager.add_file(token, json_filename, json_bytes)
     
     # 4. Save XLSX File

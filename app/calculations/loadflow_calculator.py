@@ -7,31 +7,20 @@ from app.schemas.loadflow_schema import TransformerData, SwingBusInfo, StudyCase
 def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) -> dict:
     """
     Core logic for Loadflow Analysis.
-
-    Features:
-    - Multi-Scenario Support: Groups files by Study Case ID + Config.
-    - Battle Logic: Determines winner based on (1) Tolerance Check, (2) Precision, (3) Proximity.
-    - Silent Mode: Minimal logging to avoid spamming production logs.
     """
-    # [?] [THOUGHT] Logic remains the same, only the data extraction layer is updated for compatibility.
     print(f"🚀 START ANALYSIS (Multi-Scenario Strategy - Silent Mode)")
     results = []
     
     target = settings.target_mw
     tol = settings.tolerance_mw
-    
-    # Dictionary to track the champion for each scenario group.
-    # Key: (StudyID, Config) -> Value: {filename, delta, valid, reason}
     champions = {}
-    
     file_count = 0
 
     for filename, content in files_content.items():
         clean_name = os.path.basename(filename)
         ext = clean_name.lower()
         
-        # Filter temp files
-        # [decision:logic] Only .lf1s and .mdb are officially targeted for Loadflow SQLite extraction
+        # [decision:logic] Only .lf1s and .mdb are officially targeted
         if clean_name.startswith('~$') or not (ext.endswith('.lf1s') or ext.endswith('.si2s') or ext.endswith('.mdb')):
             continue
             
@@ -51,12 +40,10 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
             "victory_reason": None
         }
 
-        # --- 1. DATA EXTRACTION (Updated to use db_converter) ---
+        # --- 1. DATA EXTRACTION ---
         try:
-            # [+] [INFO] Using new db_converter.extract_data_from_db logic
             dfs = db_converter.extract_data_from_db(content)
-        except: 
-            dfs = None
+        except: dfs = None
             
         if not dfs:
             results.append(res); continue
@@ -155,7 +142,9 @@ def analyze_loadflow(files_content: dict, settings, only_winners: bool = False) 
                             if col_volt: data.volt_mag = float(str(selected_row[col_volt]).replace(',', '.'))
                             if col_pf: data.pf = float(str(selected_row[col_pf]).replace(',', '.'))
                         except: pass
-                        res["transformers"][tx_id] = data
+                        
+                        # [!] [CRITICAL] Convert to dict using ALIASES (Tap, LFMW...) to ensure correct JSON keys
+                        res["transformers"][tx_id] = data.dict(by_alias=True)
 
         # --- 6. BATTLE LOGIC ---
         if res["mw_flow"] is not None:
