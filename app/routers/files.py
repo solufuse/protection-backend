@@ -22,24 +22,21 @@ def get_user_info(creds: HTTPAuthorizationCredentials = Depends(security)):
 @router.post("/files/upload")
 def upload_files(files: List[UploadFile] = File(...), user: dict = Depends(get_user_info)):
     
-    # 1. Check Global Guest Restrictions (Quota count)
+    # 1. Check Global Guest Restrictions
     target_dir = check_guest_restrictions(user['uid'], user['is_guest'], action="upload")
 
     saved_files = []
     
     for file in files:
-        # [!] [CRITICAL] : Block Archives/ZIPs for Guests to prevent quota bypass
         if user['is_guest']:
+            # Block Archives
             ext = os.path.splitext(file.filename)[1].lower()
             if ext in ['.zip', '.rar', '.7z', '.tar', '.gz']:
-                raise HTTPException(
-                    status_code=403, 
-                    detail=f"🔒 RESTRICTED: Guests cannot upload archives ({ext}). Please upload individual files or sign in."
-                )
+                raise HTTPException(status_code=403, detail=f"🔒 RESTRICTED: Guests cannot upload archives ({ext}).")
 
-            # Re-check quota count for every file in the loop
+            # Re-check quota count (Limit 10)
             current_count = len([f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f))])
-            if current_count >= 5:
+            if current_count >= 10:
                  break 
 
         file_path = os.path.join(target_dir, file.filename)
@@ -51,7 +48,7 @@ def upload_files(files: List[UploadFile] = File(...), user: dict = Depends(get_u
         "status": "success", 
         "saved": saved_files, 
         "message": "Upload successful",
-        "guest_warning": "Limit Reached" if user['is_guest'] and len(saved_files) < len(files) else None
+        "guest_warning": "Limit Reached (10 files)" if user['is_guest'] and len(saved_files) < len(files) else None
     }
 
 @router.get("/files/list")
