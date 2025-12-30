@@ -4,40 +4,46 @@ from fastapi import HTTPException
 
 BASE_STORAGE = "/app/storage"
 
-def get_user_storage(uid: str):
-    # Stockage unifié : tout le monde au même endroit
+def get_user_storage(uid: str) -> str:
+    """
+    [decision:logic] : Unified storage path. Everyone gets a folder based on UID.
+    No separation between 'guest' and 'auth' folders to simplify transitions.
+    """
     path = os.path.join(BASE_STORAGE, uid)
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
     return path
 
-def check_guest_restrictions(uid: str, is_guest: bool, action: str):
+def check_guest_restrictions(uid: str, is_guest: bool, action: str) -> str:
     """
-    Centralise toute la politique de restriction Guest.
+    [!] [CRITICAL] : Enforces strict limits for Guest users.
+    Returns the user path if allowed, raises HTTPException if denied.
     """
     user_path = get_user_storage(uid)
 
-    # Si c'est un membre payant/inscrit, aucune limite.
+    # [+] [INFO] : Full members (not guests) have no restrictions.
     if not is_guest:
         return user_path
 
-    # --- RÈGLES POUR INVITÉS (GUESTS) ---
+    # --- GUEST RULES ---
     
-    # Règle 1 : Interdiction formelle de créer des projets (dossiers)
+    # Rule 1: Guests cannot create projects (folders)
     if action == "create_project":
         raise HTTPException(
             status_code=403, 
-            detail="🔒 CREATION REFUSÉE : Les invités ne peuvent pas créer de projets. Connectez-vous !"
+            detail="🔒 CREATION DENIED: Guests cannot create projects. Please sign in with Google."
         )
 
-    # Règle 2 : Quota strict de 5 fichiers
+    # Rule 2: Strict 5-file quota
     if action == "upload":
-        # On compte les fichiers existants
+        # Count existing files in the root of user directory
         files = [f for f in os.listdir(user_path) if os.path.isfile(os.path.join(user_path, f))]
+        
+        # [decision:quota] : Limit set to 5 files for demo purposes
         if len(files) >= 5:
             raise HTTPException(
                 status_code=403, 
-                detail="🔒 QUOTA ATTEINT : Mode démo limité à 5 fichiers. Connectez-vous pour continuer."
+                detail="🔒 QUOTA REACHED: Guest mode is limited to 5 files. Please sign in for unlimited storage."
             )
             
     return user_path
