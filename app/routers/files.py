@@ -3,6 +3,7 @@ from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from typing import List
 import shutil
 import os
+import time
 from ..guest_guard import check_guest_restrictions
 from firebase_admin import auth
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -22,8 +23,16 @@ def get_user_info(creds: HTTPAuthorizationCredentials = Depends(security)):
 @router.post("/files/upload")
 def upload_files(files: List[UploadFile] = File(...), user: dict = Depends(get_user_info)):
     
-    # 1. Check Global Guest Restrictions
+    # 1. Permission & Quota Check
     target_dir = check_guest_restrictions(user['uid'], user['is_guest'], action="upload")
+
+    # [!] [CRITICAL] : TAGGING GUEST FOLDERS
+    # If user is guest, verify/create the marker file
+    if user['is_guest']:
+        marker_path = os.path.join(target_dir, ".guest")
+        if not os.path.exists(marker_path):
+            with open(marker_path, "w") as f:
+                f.write("This folder belongs to a temporary guest user.")
 
     saved_files = []
     
@@ -31,10 +40,10 @@ def upload_files(files: List[UploadFile] = File(...), user: dict = Depends(get_u
         if user['is_guest']:
             # Block Archives
             ext = os.path.splitext(file.filename)[1].lower()
-            if ext in ['.zip', '.rar', '.7z', '.tar', '.gz']:
+            if ext in ['.zip', '.rar', '.7z']:
                 raise HTTPException(status_code=403, detail=f"🔒 RESTRICTED: Guests cannot upload archives ({ext}).")
 
-            # Re-check quota count (Limit 10)
+            # Check Limit (10)
             current_count = len([f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f))])
             if current_count >= 10:
                  break 
@@ -47,8 +56,7 @@ def upload_files(files: List[UploadFile] = File(...), user: dict = Depends(get_u
     return {
         "status": "success", 
         "saved": saved_files, 
-        "message": "Upload successful",
-        "guest_warning": "Limit Reached (10 files)" if user['is_guest'] and len(saved_files) < len(files) else None
+        "guest_warning": "Limit Reached" if user['is_guest'] and len(saved_files) < len(files) else None
     }
 
 @router.get("/files/list")
@@ -56,4 +64,5 @@ def list_files(user: dict = Depends(get_user_info)):
     target_dir = os.path.join("/app/storage", user['uid'])
     if not os.path.exists(target_dir):
         return []
-    return [f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f))]
+    # Don't list the hidden .guest file
+    return [f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f)) and not f.startswith('.')]
