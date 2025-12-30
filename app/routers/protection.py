@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from app.core.security import get_current_token
@@ -5,114 +6,78 @@ from app.services import session_manager
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
-import json
-import pandas as pd
+import json, pandas as pd
 
-# IMPORT DU SOUS-ROUTEUR
 from app.routers import ansi_51 as ansi_51_router
-from app.routers import common as common_router # [+] [INFO] New sub-router
+from app.routers import common as common_router
 
 router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
-
-# --- INCLUSION DES SOUS-MODULES ---
 router.include_router(ansi_51_router.router)
-router.include_router(common_router.router) # [+] [INFO] Mounts /protection/common/...
+router.include_router(common_router.router)
 
-# --- HELPERS (Utilisés pour le RUN GLOBAL) ---
-
-def is_supported_protection(fname: str) -> bool:
-    e = fname.lower()
-    return e.endswith('.si2s') or e.endswith('.mdb')
-
-def get_merged_dataframes_for_calc(token: str):
-    files = session_manager.get_files(token)
+def get_merged_data(target_id, is_proj):
+    files = session_manager.get_files(target_id, is_proj)
     if not files: return {}
-    merged_dfs = {}
+    merged = {}
     for name, content in files.items():
-        if is_supported_protection(name):
+        if name.lower().endswith(('.si2s', '.mdb')):
             dfs = db_converter.extract_data_from_db(content)
             if dfs:
                 for t, df in dfs.items():
-                    if t not in merged_dfs: merged_dfs[t] = []
+                    if t not in merged: merged[t] = []
                     df['SourceFilename'] = name 
-                    merged_dfs[t].append(df)
+                    merged[t].append(df)
     final = {}
-    for k, v in merged_dfs.items():
+    for k, v in merged.items():
         try: final[k] = pd.concat(v, ignore_index=True)
         except: final[k] = v[0]
     return final
 
-def get_config_from_session(token: str) -> ProjectConfig:
-    files = session_manager.get_files(token)
-    if not files: raise HTTPException(status_code=400, detail="Session is empty.")
-    
-    target_content = None
-    if "config.json" in files:
-        target_content = files["config.json"]
-    else:
-        for name, content in files.items():
-            if name.lower().endswith(".json"):
-                target_content = content
-                break
-    if target_content is None:
-        raise HTTPException(status_code=404, detail="No 'config.json' found in session.")
-    try:
-        if isinstance(target_content, bytes): text_content = target_content.decode('utf-8')
-        else: text_content = target_content  
-        data = json.loads(text_content)
-        return ProjectConfig(**data)
-    except Exception as e:
-        raise HTTPException(status_code=422, detail=f"Invalid Config JSON: {e}")
-
-# --- GLOBAL RUN (L'Orchestrateur) ---
+def get_config(target_id, is_proj) -> ProjectConfig:
+    files = session_manager.get_files(target_id, is_proj)
+    if not files: raise HTTPException(400, "Empty")
+    tgt = files.get("config.json")
+    if not tgt:
+        for n, c in files.items():
+            if n.lower().endswith(".json"): tgt = c; break
+    if not tgt: raise HTTPException(404, "No config")
+    try: return ProjectConfig(**json.loads(tgt))
+    except Exception as e: raise HTTPException(422, str(e))
 
 @router.post("/run")
-async def run_global_protection(token: str = Depends(get_current_token)):
-    """
-    L'Orchestrateur : Lance tous les modules (50, 51, 67, 87T...) en une seule fois.
-    """
-    config = get_config_from_session(token)
-    dfs_dict = get_merged_dataframes_for_calc(token)
-    config_updated = topology_manager.resolve_all(config, dfs_dict)
-    
-    global_results = []
-    
-    # Pour chaque équipement...
-    for plan in config_updated.plans:
-        plan_result = {"plan_id": plan.id, "ansi_results": {}}
-        
-        # Pour chaque fonction activée (50, 51, etc.)
-        for func_code in plan.active_functions:
-            if func_code in AVAILABLE_ANSI_MODULES:
-                module = AVAILABLE_ANSI_MODULES[func_code]
-                try:
-                    # Chaque module se débrouille avec son calcul
-                    res = module.calculate(plan, config.settings, dfs_dict)
-                    plan_result["ansi_results"][func_code] = res
-                except Exception as e:
-                    plan_result["ansi_results"][func_code] = {"error": str(e)}
-        global_results.append(plan_result)
-        
-    return {"status": "success", "results": global_results}
+async def run_global(token: str = Depends(get_current_token), project_id: Optional[str] = Query(None)):
+    target, is_proj = (project_id, True) if project_id else (token, False)
+    if is_proj and not session_manager.can_access_project(token, project_id): raise HTTPException(403, "Access Denied")
 
-# --- DATA EXPLORER ---
+    config = get_config(target, is_proj)
+    dfs = get_merged_data(target, is_proj)
+    config_updated = topology_manager.resolve_all(config, dfs)
+    
+    results = []
+    for plan in config_updated.plans:
+        res = {"plan_id": plan.id, "ansi_results": {}}
+        for func in plan.active_functions:
+            if func in AVAILABLE_ANSI_MODULES:
+                try: res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(plan, config.settings, dfs)
+                except Exception as e: res["ansi_results"][func] = {"error": str(e)}
+        results.append(res)
+    return {"status": "success", "results": results}
+
 @router.get("/data-explorer")
-def explore_data(
-    table_search: Optional[str] = Query(None),
-    filename: Optional[str] = Query(None),
-    token: str = Depends(get_current_token)
-):
-    files = session_manager.get_files(token)
-    if not files: return {"data": {}}
+def explore(table: str = None, filename: str = None, token: str = Depends(get_current_token), project_id: str = Query(None)):
+    target, is_proj = (project_id, True) if project_id else (token, False)
+    if is_proj and not session_manager.can_access_project(token, project_id): raise HTTPException(403, "Access Denied")
+    
+    files = session_manager.get_files(target, is_proj)
     results = {}
     for fname, content in files.items():
         if filename and filename.lower() not in fname.lower(): continue
-        if not is_supported_protection(fname): continue
+        if not fname.lower().endswith(('.si2s','.mdb')): continue
         dfs = db_converter.extract_data_from_db(content)
         if dfs:
-            file_results = {}
-            for table_name, df in dfs.items():
-                if table_search and table_search.upper() not in table_name.upper(): continue
-                file_results[table_name] = {"rows": len(df), "columns": list(df.columns)}
-            if file_results: results[fname] = file_results
+            fres = {}
+            for t, df in dfs.items():
+                if table and table.upper() not in t.upper(): continue
+                fres[t] = {"rows": len(df), "columns": list(df.columns)}
+            if fres: results[fname] = fres
     return {"data": results}

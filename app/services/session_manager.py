@@ -76,8 +76,6 @@ def remove_member(project_id: str, target_uid: str):
     
     if target_uid in acl["members"]:
         acl["members"].remove(target_uid)
-        # Prevent removing the owner from members list implicitly? 
-        # Usually owner stays, logic handles it.
         with open(access_path, 'w') as f:
             json.dump(acl, f, indent=2)
     return True
@@ -86,7 +84,6 @@ def list_projects_for_user(user_uid: str) -> List[Dict]:
     results = []
     if not os.path.exists(BASE_PROJECT_DIR): return []
     
-    # Scan all project folders
     for project_id in os.listdir(BASE_PROJECT_DIR):
         acl = get_project_acl(project_id)
         if acl:
@@ -100,7 +97,6 @@ def list_projects_for_user(user_uid: str) -> List[Dict]:
     return results
 
 def delete_project_permanently(project_id: str):
-    # DANGEROUS: Deletes the whole folder
     target_dir = _get_target_dir(project_id, is_project=True)
     if os.path.exists(target_dir):
         shutil.rmtree(target_dir)
@@ -136,22 +132,18 @@ def remove_file(target_id: str, filename: str, is_project: bool = False):
 
 def clear_session(target_id: str, is_project: bool = False):
     target_dir = _get_target_dir(target_id, is_project)
-    
     if is_project:
-        # [!] SAFE MODE: Delete all files EXCEPT access.json
+        # Safe Clear for Projects (Keep Access File)
         if os.path.exists(target_dir):
             for filename in os.listdir(target_dir):
                 if filename == ACCESS_FILE: continue
                 file_path = os.path.join(target_dir, filename)
                 try:
-                    if os.path.isfile(file_path) or os.path.islink(file_path):
-                        os.unlink(file_path)
-                    elif os.path.isdir(file_path):
-                        shutil.rmtree(file_path)
-                except Exception as e:
-                    print(f"Failed to delete {file_path}. Reason: {e}")
+                    if os.path.isfile(file_path) or os.path.islink(file_path): os.unlink(file_path)
+                    elif os.path.isdir(file_path): shutil.rmtree(file_path)
+                except: pass
     else:
-        # Legacy User Mode: Delete everything then recreate dir
+        # Legacy User Clear
         if os.path.exists(target_dir):
             shutil.rmtree(target_dir)
             os.makedirs(target_dir, exist_ok=True)
