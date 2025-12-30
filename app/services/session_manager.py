@@ -7,6 +7,9 @@ from typing import List, Dict, Union, Optional
 
 BASE_USER_DIR = "/app/storage"
 BASE_PROJECT_DIR = "/app/storage/projects"
+
+# [!] SECURITY: Liste des fichiers critiques qu'on ne doit jamais supprimer via API
+SYSTEM_FILES = ["access.json", "config.json"]
 ACCESS_FILE = "access.json"
 
 def _get_target_dir(target_id: str, is_project: bool) -> str:
@@ -107,7 +110,8 @@ def get_files(target_id: str, is_project: bool = False) -> Dict[str, bytes]:
         for root, dirs, files in os.walk(target_dir):
             for name in files:
                 if name.startswith('.'): continue
-                if name == ACCESS_FILE: continue 
+                if name == ACCESS_FILE: continue # Always hide ACL file from read logic
+                
                 full_path = os.path.join(root, name)
                 rel_path = os.path.relpath(full_path, target_dir).replace("\\", "/")
                 try:
@@ -117,11 +121,13 @@ def get_files(target_id: str, is_project: bool = False) -> Dict[str, bytes]:
 
 def add_file(target_id: str, filename: str, content: bytes, is_project: bool = False):
     file_path = get_absolute_file_path(target_id, filename, is_project)
+    # Note: We ALLOW overwriting config.json via Upload. We only block explicit DELETE.
     with open(file_path, 'wb') as f: f.write(content)
 
 def remove_file(target_id: str, filename: str, is_project: bool = False):
-    # [!] SECURITY: Prevent deleting ACL file via API
-    if is_project and filename == ACCESS_FILE:
+    # [!] SECURITY: Prevent deleting critical system files in PROJECTS
+    if is_project and filename in SYSTEM_FILES:
+        print(f"Tentative de suppression de {filename} bloquée (Fichier Système).")
         return False
         
     file_path = get_absolute_file_path(target_id, filename, is_project)
@@ -131,15 +137,17 @@ def remove_file(target_id: str, filename: str, is_project: bool = False):
 def clear_session(target_id: str, is_project: bool = False):
     target_dir = _get_target_dir(target_id, is_project)
     if is_project:
+        # Safe Clear for Projects (Keep System Files)
         if os.path.exists(target_dir):
             for filename in os.listdir(target_dir):
-                if filename == ACCESS_FILE: continue
+                if filename in SYSTEM_FILES: continue # [!] Skip config.json & access.json
                 file_path = os.path.join(target_dir, filename)
                 try:
                     if os.path.isfile(file_path) or os.path.islink(file_path): os.unlink(file_path)
                     elif os.path.isdir(file_path): shutil.rmtree(file_path)
                 except: pass
     else:
+        # Legacy User Clear (Delete everything, user is responsible for their own session)
         if os.path.exists(target_dir):
             shutil.rmtree(target_dir)
             os.makedirs(target_dir, exist_ok=True)
