@@ -1,19 +1,16 @@
 
 import os
-from fastapi import APIRouter, Header, Depends
+from fastapi import APIRouter, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from firebase_admin import auth
 
 router = APIRouter()
+security = HTTPBearer()
 
 @router.get("/whoami")
-def debug_who_am_i(authorization: str = Header(None)):
-    if not authorization:
-        return {"error": "No Authorization header found"}
-    
+def debug_who_am_i(creds: HTTPAuthorizationCredentials = Depends(security)):
     try:
-        token = authorization.replace("Bearer ", "")
-        # On décode sans vérifier la signature pour le debug (si jamais les clés foirent)
-        # Mais on utilise auth.verify_id_token en prod normalement
+        token = creds.credentials
         decoded = auth.verify_id_token(token)
         uid = decoded['uid']
         
