@@ -3,7 +3,6 @@ from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from typing import List
 import shutil
 import os
-import time
 from ..guest_guard import check_guest_restrictions
 from firebase_admin import auth
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -20,19 +19,36 @@ def get_user_info(creds: HTTPAuthorizationCredentials = Depends(security)):
     except:
         raise HTTPException(401, "Invalid Authentication Token")
 
+# [!] HELPER: Transforme un dossier Guest en dossier Permanent
+def vaccine_folder(target_dir: str, is_guest: bool):
+    """
+    Si l'utilisateur n'est PAS un guest, on regarde s'il y a un marqueur .guest
+    et on le supprime. Cela rend le dossier permanent et immunisé contre le nettoyage.
+    """
+    if not is_guest and os.path.exists(target_dir):
+        marker = os.path.join(target_dir, ".guest")
+        if os.path.exists(marker):
+            try:
+                os.remove(marker)
+                print(f"[INFO] Account upgraded: Removed guest marker for {target_dir}")
+            except Exception as e:
+                print(f"[ERROR] Failed to remove marker: {e}")
+
 @router.post("/files/upload")
 def upload_files(files: List[UploadFile] = File(...), user: dict = Depends(get_user_info)):
     
     # 1. Permission & Quota Check
     target_dir = check_guest_restrictions(user['uid'], user['is_guest'], action="upload")
 
-    # [!] [CRITICAL] : TAGGING GUEST FOLDERS
-    # If user is guest, verify/create the marker file
+    # 2. [FIX] VACCINE: Si l'utilisateur est connecté Google, on sauve le dossier
+    vaccine_folder(target_dir, user['is_guest'])
+
+    # 3. TAGGING (Seulement si c'est encore un guest)
     if user['is_guest']:
         marker_path = os.path.join(target_dir, ".guest")
         if not os.path.exists(marker_path):
             with open(marker_path, "w") as f:
-                f.write("This folder belongs to a temporary guest user.")
+                f.write("Guest folder.")
 
     saved_files = []
     
@@ -62,7 +78,11 @@ def upload_files(files: List[UploadFile] = File(...), user: dict = Depends(get_u
 @router.get("/files/list")
 def list_files(user: dict = Depends(get_user_info)):
     target_dir = os.path.join("/app/storage", user['uid'])
+    
+    # [FIX] VACCINE: Même juste en listant les fichiers, si on est connecté, on sauve le dossier
+    vaccine_folder(target_dir, user['is_guest'])
+
     if not os.path.exists(target_dir):
         return []
-    # Don't list the hidden .guest file
+    # On cache le fichier .guest
     return [f for f in os.listdir(target_dir) if os.path.isfile(os.path.join(target_dir, f)) and not f.startswith('.')]
