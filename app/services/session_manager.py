@@ -8,15 +8,25 @@ from typing import List, Dict, Union, Optional
 BASE_USER_DIR = "/app/storage"
 BASE_PROJECT_DIR = "/app/storage/projects"
 
-# [!] SECURITY: Liste des fichiers critiques qu'on ne doit jamais supprimer via API
+# Fichiers protégés contre la suppression API
 SYSTEM_FILES = ["access.json", "config.json"]
 ACCESS_FILE = "access.json"
+
+# [!] HELPER: Force permissions to 777 (Read/Write/Execute for everyone)
+# Cela permet à FileBrowser (ou un autre user) de modifier les fichiers créés par l'API
+def _ensure_permissions(path: str):
+    try:
+        os.chmod(path, 0o777)
+    except Exception as e:
+        print(f"[Warning] Could not chmod {path}: {e}")
 
 def _get_target_dir(target_id: str, is_project: bool) -> str:
     base = BASE_PROJECT_DIR if is_project else BASE_USER_DIR
     path = os.path.join(base, target_id)
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
+        _ensure_permissions(path) # Set perm on folder creation
+        _ensure_permissions(base) # Ensure parent is open too
     return path
 
 # --- ACL & PROJECT MANAGEMENT ---
@@ -37,6 +47,8 @@ def create_project(owner_uid: str, project_id: str, owner_email: str = "") -> bo
     
     with open(access_path, 'w') as f:
         json.dump(access_data, f, indent=2)
+    
+    _ensure_permissions(access_path) # [!] Permissions Fix
     return True
 
 def get_project_acl(project_id: str) -> Optional[Dict]:
@@ -65,6 +77,7 @@ def add_member(project_id: str, new_uid: str):
     if new_uid not in acl["members"]:
         acl["members"].append(new_uid)
         with open(access_path, 'w') as f: json.dump(acl, f, indent=2)
+        _ensure_permissions(access_path)
     return True
 
 def remove_member(project_id: str, target_uid: str):
@@ -76,6 +89,7 @@ def remove_member(project_id: str, target_uid: str):
     if target_uid in acl["members"]:
         acl["members"].remove(target_uid)
         with open(access_path, 'w') as f: json.dump(acl, f, indent=2)
+        _ensure_permissions(access_path)
     return True
 
 def list_projects_for_user(user_uid: str) -> List[Dict]:
@@ -110,7 +124,7 @@ def get_files(target_id: str, is_project: bool = False) -> Dict[str, bytes]:
         for root, dirs, files in os.walk(target_dir):
             for name in files:
                 if name.startswith('.'): continue
-                if name == ACCESS_FILE: continue # Always hide ACL file from read logic
+                if name == ACCESS_FILE: continue 
                 
                 full_path = os.path.join(root, name)
                 rel_path = os.path.relpath(full_path, target_dir).replace("\\", "/")
@@ -121,13 +135,15 @@ def get_files(target_id: str, is_project: bool = False) -> Dict[str, bytes]:
 
 def add_file(target_id: str, filename: str, content: bytes, is_project: bool = False):
     file_path = get_absolute_file_path(target_id, filename, is_project)
-    # Note: We ALLOW overwriting config.json via Upload. We only block explicit DELETE.
-    with open(file_path, 'wb') as f: f.write(content)
+    
+    with open(file_path, 'wb') as f: 
+        f.write(content)
+    
+    # [!] CRITICAL: Force permissions immediately after write
+    _ensure_permissions(file_path)
 
 def remove_file(target_id: str, filename: str, is_project: bool = False):
-    # [!] SECURITY: Prevent deleting critical system files in PROJECTS
     if is_project and filename in SYSTEM_FILES:
-        print(f"Tentative de suppression de {filename} bloquée (Fichier Système).")
         return False
         
     file_path = get_absolute_file_path(target_id, filename, is_project)
@@ -137,17 +153,16 @@ def remove_file(target_id: str, filename: str, is_project: bool = False):
 def clear_session(target_id: str, is_project: bool = False):
     target_dir = _get_target_dir(target_id, is_project)
     if is_project:
-        # Safe Clear for Projects (Keep System Files)
         if os.path.exists(target_dir):
             for filename in os.listdir(target_dir):
-                if filename in SYSTEM_FILES: continue # [!] Skip config.json & access.json
+                if filename in SYSTEM_FILES: continue
                 file_path = os.path.join(target_dir, filename)
                 try:
                     if os.path.isfile(file_path) or os.path.islink(file_path): os.unlink(file_path)
                     elif os.path.isdir(file_path): shutil.rmtree(file_path)
                 except: pass
     else:
-        # Legacy User Clear (Delete everything, user is responsible for their own session)
         if os.path.exists(target_dir):
             shutil.rmtree(target_dir)
             os.makedirs(target_dir, exist_ok=True)
+            _ensure_permissions(target_dir)
