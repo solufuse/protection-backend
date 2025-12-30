@@ -1,10 +1,27 @@
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Body
+from pydantic import BaseModel
 import firebase_admin
 import os
 import subprocess
 
 router = APIRouter(tags=["System"])
+
+# Modèle pour la requête
+class AdminRequest(BaseModel):
+    uid: str
+
+# [SECURITE] Fonction qui vérifie l'UID via la variable d'environnement
+def is_admin_authorized(uid: str) -> bool:
+    # On récupère la variable définie dans Dokploy
+    admin_uid = os.getenv("ADMIN_UID")
+    
+    # Si pas de variable définie, sécurité maximale : personne ne passe
+    if not admin_uid:
+        return False
+        
+    # On compare (strip retire les espaces éventuels)
+    return uid.strip() == admin_uid.strip()
 
 @router.get("/")
 def read_root(): 
@@ -21,32 +38,37 @@ def firebase_check():
         return {
             "status": "connected", 
             "message": "Firebase Admin est actif ✅",
-            "app_name": app.name,
-            "credential_type": "Service Account JSON" if os.getenv("FIREBASE_CREDENTIALS_JSON") else "Automatic/None"
+            "app_name": app.name
         }
-    except ValueError:
-        return {"status": "disconnected", "message": "⚠️ Firebase n'est pas initialisé."}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
-# [!] NEW: Route magique pour donner les droits à FileBrowser
 @router.post("/system/unlock-storage")
-def unlock_storage_permissions():
+def unlock_storage_permissions(payload: AdminRequest):
     """
-    Force les permissions 777 sur tout le dossier /app/storage.
-    Permet à FileBrowser de supprimer/modifier les fichiers créés par l'API.
+    Force les permissions 777 sur /app/storage.
+    Requiert que l'UID envoyé corresponde à la variable d'environnement ADMIN_UID.
     """
-    target_dir = "/app/storage"
     
+    # 1. Vérification de sécurité
+    if not is_admin_authorized(payload.uid):
+        # On ne dit pas pourquoi pour ne pas aider les pirates (juste "Forbidden")
+        raise HTTPException(status_code=403, detail="⛔ Access Denied.")
+
+    # 2. Exécution
+    target_dir = "/app/storage"
     if not os.path.exists(target_dir):
         raise HTTPException(404, "Storage directory not found")
 
     try:
-        # Exécute la commande Linux 'chmod -R 777' en tant que root (car l'API est root)
         result = subprocess.run(["chmod", "-R", "777", target_dir], capture_output=True, text=True)
         
         if result.returncode == 0:
-            return {"status": "success", "message": "Storage unlocked (chmod 777 applied recursively). FileBrowser has full access now."}
+            return {
+                "status": "success", 
+                "message": "Storage unlocked successfully.", 
+                "executed_by": "Authorized Admin"
+            }
         else:
             raise Exception(result.stderr)
             
