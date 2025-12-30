@@ -1,9 +1,20 @@
+
+# --- Framework & Server ---
 fastapi
 uvicorn
 python-multipart
-pandas
-openpyxl
-numpy
+
+# --- Database & Auth (New) ---
+sqlalchemy
+firebase-admin
 python-jose[cryptography]
 
-firebase-admin
+# --- Calculation Engines (Legacy) ---
+pandas
+numpy
+openpyxl
+
+# --- Utilities ---
+requests
+httpx
+pydantic
