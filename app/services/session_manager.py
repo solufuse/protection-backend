@@ -2,6 +2,7 @@
 import os
 import shutil
 import json
+import datetime
 from typing import List, Dict, Union
 
 # [context:flow] : Users stay in root /app/storage for compatibility
@@ -28,10 +29,13 @@ def create_project(owner_uid: str, project_id: str) -> bool:
     if os.path.exists(access_path):
         return False
 
+    # [decision:logic] Generate real timestamp
+    now_iso = datetime.datetime.now().isoformat()
+
     access_data = {
         "owner": owner_uid,
         "members": [owner_uid],
-        "created_at": "timestamp_placeholder",
+        "created_at": now_iso,
         "is_public": False
     }
     

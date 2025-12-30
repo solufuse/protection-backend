@@ -22,7 +22,6 @@ def get_file_content_via_token_raw_secure(token_raw: str, filename: str):
         raise HTTPException(status_code=401, detail="Invalid Token Signature")
 
     # Assuming ingestion only works on USER scope for now (legacy)
-    # To add project support here, we would need project_id in query params
     session_manager.get_files(user_id) 
     file_path = get_absolute_file_path(user_id, filename, is_project=False)
     
