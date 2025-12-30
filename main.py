@@ -1,7 +1,10 @@
 
+import uvicorn
 from app.main import app
 
-# Ce bloc permet de lancer le serveur localement avec 'python main.py'
+# Point d'entrée principal
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # [CONFIG] Lancement sur le Port 80 (Standard HTTP)
+    # Note: Sur une machine locale Linux, le port 80 nécessite souvent 'sudo'.
+    # Dans Docker/Dokploy, c'est géré automatiquement.
+    uvicorn.run(app, host="0.0.0.0", port=80)
