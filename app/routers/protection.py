@@ -7,7 +7,6 @@ from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
 import json, pandas as pd
-
 from app.routers import ansi_51 as ansi_51_router
 from app.routers import common as common_router
 
@@ -62,22 +61,3 @@ async def run_global(token: str = Depends(get_current_token), project_id: Option
                 except Exception as e: res["ansi_results"][func] = {"error": str(e)}
         results.append(res)
     return {"status": "success", "results": results}
-
-@router.get("/data-explorer")
-def explore(table: str = None, filename: str = None, token: str = Depends(get_current_token), project_id: str = Query(None)):
-    target, is_proj = (project_id, True) if project_id else (token, False)
-    if is_proj and not session_manager.can_access_project(token, project_id): raise HTTPException(403, "Access Denied")
-    
-    files = session_manager.get_files(target, is_proj)
-    results = {}
-    for fname, content in files.items():
-        if filename and filename.lower() not in fname.lower(): continue
-        if not fname.lower().endswith(('.si2s','.mdb')): continue
-        dfs = db_converter.extract_data_from_db(content)
-        if dfs:
-            fres = {}
-            for t, df in dfs.items():
-                if table and table.upper() not in t.upper(): continue
-                fres[t] = {"rows": len(df), "columns": list(df.columns)}
-            if fres: results[fname] = fres
-    return {"data": results}

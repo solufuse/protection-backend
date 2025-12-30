@@ -22,8 +22,7 @@ def create_project(owner_uid: str, project_id: str, owner_email: str = "") -> bo
     project_dir = _get_target_dir(project_id, is_project=True)
     access_path = os.path.join(project_dir, ACCESS_FILE)
     
-    if os.path.exists(access_path):
-        return False
+    if os.path.exists(access_path): return False
 
     access_data = {
         "owner": owner_uid,
@@ -57,33 +56,28 @@ def is_project_owner(user_uid: str, project_id: str) -> bool:
 def add_member(project_id: str, new_uid: str):
     project_dir = _get_target_dir(project_id, is_project=True)
     access_path = os.path.join(project_dir, ACCESS_FILE)
-    
     acl = get_project_acl(project_id)
     if not acl: return False
     
     if new_uid not in acl["members"]:
         acl["members"].append(new_uid)
-        with open(access_path, 'w') as f:
-            json.dump(acl, f, indent=2)
+        with open(access_path, 'w') as f: json.dump(acl, f, indent=2)
     return True
 
 def remove_member(project_id: str, target_uid: str):
     project_dir = _get_target_dir(project_id, is_project=True)
     access_path = os.path.join(project_dir, ACCESS_FILE)
-    
     acl = get_project_acl(project_id)
     if not acl: return False
     
     if target_uid in acl["members"]:
         acl["members"].remove(target_uid)
-        with open(access_path, 'w') as f:
-            json.dump(acl, f, indent=2)
+        with open(access_path, 'w') as f: json.dump(acl, f, indent=2)
     return True
 
 def list_projects_for_user(user_uid: str) -> List[Dict]:
     results = []
     if not os.path.exists(BASE_PROJECT_DIR): return []
-    
     for project_id in os.listdir(BASE_PROJECT_DIR):
         acl = get_project_acl(project_id)
         if acl:
@@ -98,8 +92,7 @@ def list_projects_for_user(user_uid: str) -> List[Dict]:
 
 def delete_project_permanently(project_id: str):
     target_dir = _get_target_dir(project_id, is_project=True)
-    if os.path.exists(target_dir):
-        shutil.rmtree(target_dir)
+    if os.path.exists(target_dir): shutil.rmtree(target_dir)
 
 # --- FILE OPERATIONS ---
 
@@ -127,13 +120,17 @@ def add_file(target_id: str, filename: str, content: bytes, is_project: bool = F
     with open(file_path, 'wb') as f: f.write(content)
 
 def remove_file(target_id: str, filename: str, is_project: bool = False):
+    # [!] SECURITY: Prevent deleting ACL file via API
+    if is_project and filename == ACCESS_FILE:
+        return False
+        
     file_path = get_absolute_file_path(target_id, filename, is_project)
     if os.path.exists(file_path): os.remove(file_path)
+    return True
 
 def clear_session(target_id: str, is_project: bool = False):
     target_dir = _get_target_dir(target_id, is_project)
     if is_project:
-        # Safe Clear for Projects (Keep Access File)
         if os.path.exists(target_dir):
             for filename in os.listdir(target_dir):
                 if filename == ACCESS_FILE: continue
@@ -143,7 +140,6 @@ def clear_session(target_id: str, is_project: bool = False):
                     elif os.path.isdir(file_path): shutil.rmtree(file_path)
                 except: pass
     else:
-        # Legacy User Clear
         if os.path.exists(target_dir):
             shutil.rmtree(target_dir)
             os.makedirs(target_dir, exist_ok=True)

@@ -80,7 +80,7 @@ def get_details(token: str = Depends(get_current_token), project_id: Optional[st
         if not session_manager.can_access_project(token, project_id): raise HTTPException(403, "Access Denied.")
         target_id, is_project = project_id, True
     
-    session_manager.get_files(target_id, is_project) # Force scan/load
+    session_manager.get_files(target_id, is_project)
     base_dir = session_manager._get_target_dir(target_id, is_project)
     files_info = []
     if os.path.exists(base_dir):
@@ -111,7 +111,12 @@ def delete_file(path: str, token: str = Depends(get_current_token), project_id: 
     if project_id:
         if not session_manager.can_access_project(token, project_id): raise HTTPException(403, "Access Denied.")
         target_id, is_project = project_id, True
-    session_manager.remove_file(target_id, path, is_project)
+    
+    # Secure Delete call
+    success = session_manager.remove_file(target_id, path, is_project)
+    if not success:
+        return {"status": "protected", "message": "Cannot delete protected system files (access.json)."}
+        
     return {"status": "deleted"}
 
 @router.delete("/clear")
