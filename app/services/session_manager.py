@@ -3,15 +3,11 @@ import os
 import shutil
 import json
 import datetime
-from typing import List, Dict, Union
+from typing import List, Dict, Union, Optional
 
-# [context:flow] : Users stay in root /app/storage for compatibility
 BASE_USER_DIR = "/app/storage"
-# [context:flow] : Projects get their own dedicated subdirectory
 BASE_PROJECT_DIR = "/app/storage/projects"
 ACCESS_FILE = "access.json"
-
-# --- HELPER INTERNAL ---
 
 def _get_target_dir(target_id: str, is_project: bool) -> str:
     base = BASE_PROJECT_DIR if is_project else BASE_USER_DIR
@@ -20,22 +16,20 @@ def _get_target_dir(target_id: str, is_project: bool) -> str:
         os.makedirs(path, exist_ok=True)
     return path
 
-# --- ACL MANAGEMENT (ACCESS CONTROL) ---
+# --- ACL & PROJECT MANAGEMENT ---
 
-def create_project(owner_uid: str, project_id: str) -> bool:
+def create_project(owner_uid: str, project_id: str, owner_email: str = "") -> bool:
     project_dir = _get_target_dir(project_id, is_project=True)
     access_path = os.path.join(project_dir, ACCESS_FILE)
     
     if os.path.exists(access_path):
         return False
 
-    # [decision:logic] Generate real timestamp
-    now_iso = datetime.datetime.now().isoformat()
-
     access_data = {
         "owner": owner_uid,
+        "owner_email": owner_email,
         "members": [owner_uid],
-        "created_at": now_iso,
+        "created_at": datetime.datetime.now().isoformat(),
         "is_public": False
     }
     
@@ -43,22 +37,73 @@ def create_project(owner_uid: str, project_id: str) -> bool:
         json.dump(access_data, f, indent=2)
     return True
 
+def get_project_acl(project_id: str) -> Optional[Dict]:
+    project_dir = _get_target_dir(project_id, is_project=True)
+    access_path = os.path.join(project_dir, ACCESS_FILE)
+    if not os.path.exists(access_path): return None
+    try:
+        with open(access_path, 'r') as f: return json.load(f)
+    except: return None
+
 def can_access_project(user_uid: str, project_id: str) -> bool:
+    acl = get_project_acl(project_id)
+    if not acl: return False
+    return (user_uid == acl.get("owner")) or (user_uid in acl.get("members", []))
+
+def is_project_owner(user_uid: str, project_id: str) -> bool:
+    acl = get_project_acl(project_id)
+    return acl and (acl.get("owner") == user_uid)
+
+def add_member(project_id: str, new_uid: str):
     project_dir = _get_target_dir(project_id, is_project=True)
     access_path = os.path.join(project_dir, ACCESS_FILE)
     
-    if not os.path.exists(access_path):
-        return False
-        
-    try:
-        with open(access_path, 'r') as f:
-            data = json.load(f)
-        if data.get("owner") == user_uid: return True
-        if user_uid in data.get("members", []): return True
-        return False
-    except Exception as e:
-        print(f"[legacy:warning] ACL Read Error: {e}")
-        return False
+    acl = get_project_acl(project_id)
+    if not acl: return False
+    
+    if new_uid not in acl["members"]:
+        acl["members"].append(new_uid)
+        with open(access_path, 'w') as f:
+            json.dump(acl, f, indent=2)
+    return True
+
+def remove_member(project_id: str, target_uid: str):
+    project_dir = _get_target_dir(project_id, is_project=True)
+    access_path = os.path.join(project_dir, ACCESS_FILE)
+    
+    acl = get_project_acl(project_id)
+    if not acl: return False
+    
+    if target_uid in acl["members"]:
+        acl["members"].remove(target_uid)
+        # Prevent removing the owner from members list implicitly? 
+        # Usually owner stays, logic handles it.
+        with open(access_path, 'w') as f:
+            json.dump(acl, f, indent=2)
+    return True
+
+def list_projects_for_user(user_uid: str) -> List[Dict]:
+    results = []
+    if not os.path.exists(BASE_PROJECT_DIR): return []
+    
+    # Scan all project folders
+    for project_id in os.listdir(BASE_PROJECT_DIR):
+        acl = get_project_acl(project_id)
+        if acl:
+            if user_uid == acl.get("owner") or user_uid in acl.get("members", []):
+                results.append({
+                    "project_id": project_id,
+                    "role": "owner" if user_uid == acl.get("owner") else "member",
+                    "created_at": acl.get("created_at"),
+                    "owner_email": acl.get("owner_email", "unknown")
+                })
+    return results
+
+def delete_project_permanently(project_id: str):
+    # DANGEROUS: Deletes the whole folder
+    target_dir = _get_target_dir(project_id, is_project=True)
+    if os.path.exists(target_dir):
+        shutil.rmtree(target_dir)
 
 # --- FILE OPERATIONS ---
 
@@ -69,35 +114,44 @@ def get_absolute_file_path(target_id: str, filename: str, is_project: bool = Fal
 def get_files(target_id: str, is_project: bool = False) -> Dict[str, bytes]:
     target_dir = _get_target_dir(target_id, is_project)
     files_content = {}
-    
     if os.path.exists(target_dir):
         for root, dirs, files in os.walk(target_dir):
             for name in files:
                 if name.startswith('.'): continue
                 if name == ACCESS_FILE: continue 
-                
                 full_path = os.path.join(root, name)
                 rel_path = os.path.relpath(full_path, target_dir).replace("\\", "/")
                 try:
-                    with open(full_path, 'rb') as f:
-                        files_content[rel_path] = f.read()
-                except Exception as e:
-                    print(f"Error reading {rel_path}: {e}")
-                
+                    with open(full_path, 'rb') as f: files_content[rel_path] = f.read()
+                except: pass
     return files_content
 
 def add_file(target_id: str, filename: str, content: bytes, is_project: bool = False):
     file_path = get_absolute_file_path(target_id, filename, is_project)
-    with open(file_path, 'wb') as f:
-        f.write(content)
+    with open(file_path, 'wb') as f: f.write(content)
 
 def remove_file(target_id: str, filename: str, is_project: bool = False):
     file_path = get_absolute_file_path(target_id, filename, is_project)
-    if os.path.exists(file_path):
-        os.remove(file_path)
+    if os.path.exists(file_path): os.remove(file_path)
 
 def clear_session(target_id: str, is_project: bool = False):
     target_dir = _get_target_dir(target_id, is_project)
-    if os.path.exists(target_dir):
-        shutil.rmtree(target_dir)
-        os.makedirs(target_dir, exist_ok=True)
+    
+    if is_project:
+        # [!] SAFE MODE: Delete all files EXCEPT access.json
+        if os.path.exists(target_dir):
+            for filename in os.listdir(target_dir):
+                if filename == ACCESS_FILE: continue
+                file_path = os.path.join(target_dir, filename)
+                try:
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                except Exception as e:
+                    print(f"Failed to delete {file_path}. Reason: {e}")
+    else:
+        # Legacy User Mode: Delete everything then recreate dir
+        if os.path.exists(target_dir):
+            shutil.rmtree(target_dir)
+            os.makedirs(target_dir, exist_ok=True)
