@@ -11,8 +11,9 @@ from typing import List, Dict
 
 router = APIRouter()
 
-# CONFIGURATION
-STORAGE_ROOT = "/data"  # Le dossier racine monté dans Docker (ou ./data en local)
+# [CONFIGURATION]
+# Doit correspondre exactement à BASE_STORAGE dans guest_guard.py
+STORAGE_ROOT = "/app/storage" 
 
 # --- HELPER: CALCUL TAILLE DOSSIER ---
 def get_size(start_path = '.'):
@@ -20,7 +21,6 @@ def get_size(start_path = '.'):
     for dirpath, dirnames, filenames in os.walk(start_path):
         for f in filenames:
             fp = os.path.join(dirpath, f)
-            # skip if it is symbolic link
             if not os.path.islink(fp):
                 total_size += os.path.getsize(fp)
     return total_size
@@ -43,20 +43,30 @@ def require_super_admin(user: User = Depends(get_current_user)):
 # 1. GLOBAL STATS (Dashboard View)
 @router.get("/stats", dependencies=[Depends(require_super_admin)])
 def get_storage_stats():
+    # Création du dossier s'il n'existe pas (pour éviter l'erreur au premier lancement)
     if not os.path.exists(STORAGE_ROOT):
-        return {"error": "Storage root not found", "path": STORAGE_ROOT}
+        try:
+            os.makedirs(STORAGE_ROOT, exist_ok=True)
+        except OSError:
+            return {"error": "Storage root not found and cannot be created", "path": STORAGE_ROOT}
     
     total_size = get_size(STORAGE_ROOT)
     
-    # Scan projects
+    # Scan projects (dossiers uniquement)
     projects_on_disk = [d for d in os.listdir(STORAGE_ROOT) if os.path.isdir(os.path.join(STORAGE_ROOT, d))]
     
+    # Disk Usage global du volume
+    try:
+        usage = shutil.disk_usage(STORAGE_ROOT)
+    except:
+        usage = "unknown"
+
     return {
         "root_path": STORAGE_ROOT,
         "total_size_raw": total_size,
         "total_size_fmt": format_bytes(total_size),
         "total_folders": len(projects_on_disk),
-        "disk_usage": shutil.disk_usage(STORAGE_ROOT) # Info système global (Free/Used)
+        "disk_usage": usage
     }
 
 # 2. LIST ALL FOLDERS (Physical vs DB Audit)
@@ -65,11 +75,12 @@ def audit_storage(db: Session = Depends(get_db)):
     if not os.path.exists(STORAGE_ROOT):
         return []
 
-    # 1. Ce qu'il y a sur le DISQUE
+    # A. Ce qu'il y a sur le DISQUE
     disk_projects = []
     try:
         for item in os.listdir(STORAGE_ROOT):
             item_path = os.path.join(STORAGE_ROOT, item)
+            # On ne liste que les dossiers (les UIDs sont des dossiers)
             if os.path.isdir(item_path):
                 size = get_size(item_path)
                 disk_projects.append({
@@ -81,17 +92,26 @@ def audit_storage(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(500, f"Disk Scan Error: {str(e)}")
 
-    # 2. Ce qu'il y a dans la DB
+    # B. Ce qu'il y a dans la DB
+    # On récupère tous les IDs de Users et de Projets pour comparer
+    # (Note: Dans ton système actuel, les dossiers s'appellent par l'UID du user pour le stockage invité)
+    
+    # Liste des UIDs connus (Users)
+    db_users = db.query(User).all()
+    known_ids = {u.firebase_uid for u in db_users}
+    
+    # Liste des IDs de projets (si les projets ont leur propre dossier séparé)
     db_projects = db.query(Project).all()
-    db_ids = {p.id for p in db_projects}
+    known_ids.update({p.id for p in db_projects})
 
-    # 3. Comparaison (Recherche des orphelins)
+    # C. Comparaison
     result = []
     for p in disk_projects:
-        if p["id"] in db_ids:
-            p["status"] = "active" # Sain
+        # Si le nom du dossier correspond à un UID User ou un ID Projet
+        if p["id"] in known_ids:
+            p["status"] = "active"
         else:
-            p["status"] = "orphan" # Dangereux (Prend de la place pour rien)
+            p["status"] = "orphan" 
         result.append(p)
         
     return result
@@ -99,7 +119,7 @@ def audit_storage(db: Session = Depends(get_db)):
 # 3. DELETE FOLDER (Force Cleanup)
 @router.delete("/{folder_id}", dependencies=[Depends(require_super_admin)])
 def force_delete_folder(folder_id: str):
-    # Sécurité : Empêcher de supprimer la racine ou des dossiers système
+    # Sécurité
     if ".." in folder_id or folder_id.startswith("/") or folder_id in [".", "lost+found"]:
         raise HTTPException(400, "Invalid folder ID")
         
