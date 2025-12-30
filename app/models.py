@@ -10,8 +10,7 @@ class User(Base):
     firebase_uid = Column(String, unique=True, index=True)
     email = Column(String, unique=True, index=True)
     
-    # ROLE GLOBAL (Staff Solufuse)
-    # Values: "super_admin", "moderator", "user"
+    # Global Role: "super_admin", "moderator", "user"
     global_role = Column(String, default="user") 
     
     project_memberships = relationship("ProjectMember", back_populates="user")
@@ -31,8 +30,7 @@ class ProjectMember(Base):
     project_id = Column(String, ForeignKey("projects.id"))
     user_id = Column(Integer, ForeignKey("users.id"))
     
-    # ROLE PROJET (Interne au client)
-    # Values: "owner" (Delete), "admin" (Add Member), "editor" (Write), "viewer" (Read)
+    # Project Role: "owner", "admin", "editor", "viewer"
     project_role = Column(String, default="viewer")
     
     user = relationship("User", back_populates="project_memberships")
