@@ -58,10 +58,9 @@ def get_config_from_files(files: Dict[str, bytes]) -> ProjectConfig:
 def run_batch_internal(config: ProjectConfig, files: Dict[str, bytes]):
     results = []
     
-    # 1. Build Global Map (Crucial Fix)
+    # 1. Build Global Map (REQUIRED by library)
     global_tx_map = common_lib.build_global_transformer_map(files)
 
-    # 2. Filter Files
     net_files = {k: v for k, v in files.items() if is_protection_file(k)}
     
     for fname, content in net_files.items():
@@ -73,8 +72,11 @@ def run_batch_internal(config: ProjectConfig, files: Dict[str, bytes]):
         for plan in config.plans:
             if "51" in plan.active_functions or "ANSI 51" in plan.active_functions:
                 try:
-                    # 3. Pass Map to Calculate (Crucial Fix)
-                    res = ansi_51.calculate(plan, config.settings, dfs, global_tx_map)
+                    # [CRITICAL FIX HERE]
+                    # - 2nd Arg: 'config' (ProjectConfig), NOT config.settings
+                    # - 4th Arg: 'global_tx_map' (Required)
+                    res = ansi_51.calculate(plan, config, dfs, global_tx_map)
+                    
                     results.append({
                         "file": fname,
                         "plan_id": plan.id,

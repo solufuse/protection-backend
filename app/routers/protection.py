@@ -10,7 +10,7 @@ from app.core.security import get_current_token
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
-from app.calculations.ansi_code import common as common_lib # [NEW IMPORT]
+from app.calculations.ansi_code import common as common_lib
 from app.routers import ansi_51 as ansi_51_router
 from app.routers import common as common_router
 from app.calculations.file_utils import is_protection_file
@@ -38,7 +38,6 @@ def resolve_protection_path(user, project_id: Optional[str], db: Session) -> str
         except: pass
         return check_guest_restrictions(uid, is_guest, action="read")
 
-# [HELPER] Load raw files first (needed for global map)
 def load_workspace_files(path: str) -> Dict[str, bytes]:
     files = {}
     if not os.path.exists(path): return files
@@ -51,7 +50,6 @@ def load_workspace_files(path: str) -> Dict[str, bytes]:
             except: pass
     return files
 
-# [HELPER] Extract DataFrames from memory dict
 def extract_data_from_memory(files: Dict[str, bytes]) -> Dict[str, pd.DataFrame]:
     merged = {}
     for f, content in files.items():
@@ -94,18 +92,18 @@ async def run_global(
 ):
     target_dir = resolve_protection_path(user, project_id, db)
     
-    # 1. Load Raw Files
+    # 1. Load Data
     files = load_workspace_files(target_dir)
     if not files: raise HTTPException(400, "Workspace empty")
 
-    # 2. Build Global Context (Config + TX Map)
+    # 2. Context
     config = load_config_from_files(files)
     global_tx_map = common_lib.build_global_transformer_map(files)
     
-    # 3. Build DataFrames
+    # 3. DataFrames
     dfs = extract_data_from_memory(files)
     
-    # 4. Solve Topology
+    # 4. Calculate
     config_updated = topology_manager.resolve_all(config, dfs)
     
     results = []
@@ -114,13 +112,12 @@ async def run_global(
         for func in plan.active_functions:
             if func in AVAILABLE_ANSI_MODULES:
                 try:
-                    # [FIX] Pass global_tx_map to all modules
-                    # Note: Modules must accept **kwargs or this specific arg
+                    # [CRITICAL FIX] Pass 'config' (ProjectConfig) and 'global_tx_map'
                     res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(
-                        plan, config.settings, dfs, global_tx_map
+                        plan, config, dfs, global_tx_map
                     )
                 except TypeError:
-                    # Fallback for modules that don't support the new argument yet
+                    # Fallback au cas où un autre module n'est pas encore à jour
                     res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(
                         plan, config.settings, dfs
                     )
