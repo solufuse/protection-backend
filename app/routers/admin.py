@@ -1,5 +1,5 @@
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import User
@@ -9,15 +9,16 @@ from typing import List, Optional
 
 router = APIRouter()
 
-# AI-REMARK: SCHEMAS
+# [?] [THOUGHT] Liste immuable des rôles autorisés pour éviter les injections/erreurs
+VALID_GLOBAL_ROLES = ["super_admin", "admin", "moderator", "nitro", "user", "guest"]
+
 class RoleUpdate(BaseModel):
     email: Optional[str] = None
-    user_id: Optional[str] = None  # Support for Firebase UID
-    role: str # super_admin, admin, moderator, nitro, user
+    user_id: Optional[str] = None
+    role: str
 
 @router.get("/me")
 def get_my_profile(user: User = Depends(get_current_user)):
-    """ [+] [INFO] Returns current logged user profile & global rank. """
     return {
         "uid": user.firebase_uid,
         "email": user.email,
@@ -26,30 +27,49 @@ def get_my_profile(user: User = Depends(get_current_user)):
     }
 
 @router.get("/users")
-def list_all_users(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """ [+] [INFO] Only Super Admin or Admin can see the full user list. """
-    if GLOBAL_LEVELS.get(user.global_role, 0) < 80: # Min Admin (80)
+def list_all_users(
+    role: Optional[str] = Query(None, description="Filtrer par rôle (ex: nitro)"),
+    user: User = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    """
+    [+] [INFO] Liste et recherche filtrée des utilisateurs.
+    [decision:logic] Réservé aux rangs Admin (80) et plus.
+    """
+    if GLOBAL_LEVELS.get(user.global_role, 0) < 80:
         raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
-    return db.query(User).all()
+    
+    query = db.query(User)
+    
+    # [+] [INFO] Application du filtre de recherche par rôle
+    if role:
+        if role not in VALID_GLOBAL_ROLES:
+            raise HTTPException(status_code=400, detail=f"Rôle '{role}' invalide. Utilisez: {VALID_GLOBAL_ROLES}")
+        query = query.filter(User.global_role == role)
+        
+    return query.all()
 
 @router.put("/users/role")
 def update_user_role(data: RoleUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    [+] [INFO] Promotes/Demotes a user via Email OR Firebase UID.
-    [decision:logic] Hierarchy check: Cannot promote someone to a rank higher than yours.
+    [!] [CRITICAL] Mise à jour STRICTE des rôles.
     """
+    # 1. Validation du rôle cible
+    if data.role not in VALID_GLOBAL_ROLES:
+        raise HTTPException(status_code=400, detail="Nom de rôle inconnu")
+
     current_level = GLOBAL_LEVELS.get(user.global_role, 0)
-    
-    # 1. Security: Need at least Moderator (60)
+    target_role_level = GLOBAL_LEVELS.get(data.role, 0)
+
+    # 2. Sécurité hiérarchique (Moderator mini)
     if current_level < 60:
         raise HTTPException(status_code=403, detail="Droit de modération requis")
     
-    # 2. Prevent promoting to a role higher than self
-    target_role_level = GLOBAL_LEVELS.get(data.role, 0)
+    # 3. Interdiction de promouvoir au dessus de soi
     if current_level < 100 and target_role_level >= current_level:
-        raise HTTPException(status_code=403, detail="Interdit de promouvoir à un rang supérieur ou égal au vôtre")
+        raise HTTPException(status_code=403, detail="Vous ne pouvez pas donner un rang égal ou supérieur au vôtre")
 
-    # 3. Find target user (UID priority, then Email)
+    # 4. Recherche de l'utilisateur
     target_user = None
     if data.user_id:
         target_user = db.query(User).filter(User.firebase_uid == data.user_id).first()
@@ -59,12 +79,8 @@ def update_user_role(data: RoleUpdate, user: User = Depends(get_current_user), d
     if not target_user:
         raise HTTPException(status_code=404, detail="Utilisateur introuvable")
 
-    # [+] [INFO] Applying the new global role
+    # [+] [INFO] Application stricte
     target_user.global_role = data.role
     db.commit()
     
-    return {
-        "status": "success", 
-        "target_email": target_user.email, 
-        "new_global_role": target_user.global_role
-    }
+    return {"status": "success", "user": target_user.email, "new_role": target_user.global_role}
