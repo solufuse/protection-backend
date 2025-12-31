@@ -10,9 +10,10 @@ from app.core.security import get_current_token
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
+from app.calculations.ansi_code import common as common_lib # [NEW IMPORT]
 from app.routers import ansi_51 as ansi_51_router
 from app.routers import common as common_router
-from app.calculations.file_utils import is_protection_file # [UPDATED IMPORT]
+from app.calculations.file_utils import is_protection_file
 
 from ..database import get_db
 from ..auth import get_current_user, ProjectAccessChecker
@@ -37,18 +38,25 @@ def resolve_protection_path(user, project_id: Optional[str], db: Session) -> str
         except: pass
         return check_guest_restrictions(uid, is_guest, action="read")
 
-def load_data_from_disk(path: str) -> Dict[str, pd.DataFrame]:
-    merged = {}
-    if not os.path.exists(path): return {}
-    
+# [HELPER] Load raw files first (needed for global map)
+def load_workspace_files(path: str) -> Dict[str, bytes]:
+    files = {}
+    if not os.path.exists(path): return files
     for f in os.listdir(path):
-        # [USE CENTRAL FILTER]
-        if is_protection_file(f):
-            full_path = os.path.join(path, f)
+        full_path = os.path.join(path, f)
+        if os.path.isfile(full_path):
             try:
                 with open(full_path, "rb") as file_obj:
-                    content = file_obj.read()
-                
+                    files[f] = file_obj.read()
+            except: pass
+    return files
+
+# [HELPER] Extract DataFrames from memory dict
+def extract_data_from_memory(files: Dict[str, bytes]) -> Dict[str, pd.DataFrame]:
+    merged = {}
+    for f, content in files.items():
+        if is_protection_file(f):
+            try:
                 dfs = db_converter.extract_data_from_db(content)
                 if dfs:
                     for t, df in dfs.items():
@@ -64,21 +72,17 @@ def load_data_from_disk(path: str) -> Dict[str, pd.DataFrame]:
         except: final[k] = v[0]
     return final
 
-def load_config_from_disk(path: str) -> ProjectConfig:
-    config_path = os.path.join(path, "config.json")
-    if not os.path.exists(config_path):
-        for f in os.listdir(path):
-            if f.endswith(".json") and "lf_results" not in f:
-                config_path = os.path.join(path, f)
-                break
+def load_config_from_files(files: Dict[str, bytes]) -> ProjectConfig:
+    tgt = files.get("config.json")
+    if not tgt:
+        for n, c in files.items():
+            if n.lower().endswith(".json") and "lf_results" not in n:
+                tgt = c; break
     
-    if not os.path.exists(config_path):
-        raise HTTPException(404, "config.json not found in workspace")
-        
+    if not tgt: raise HTTPException(404, "config.json not found")
+    
     try:
-        with open(config_path, "r") as f:
-            data = json.load(f)
-        return ProjectConfig(**data)
+        return ProjectConfig(**json.loads(tgt))
     except Exception as e:
         raise HTTPException(422, f"Config Error: {str(e)}")
 
@@ -89,9 +93,19 @@ async def run_global(
     db: Session = Depends(get_db)
 ):
     target_dir = resolve_protection_path(user, project_id, db)
-    config = load_config_from_disk(target_dir)
-    dfs = load_data_from_disk(target_dir)
     
+    # 1. Load Raw Files
+    files = load_workspace_files(target_dir)
+    if not files: raise HTTPException(400, "Workspace empty")
+
+    # 2. Build Global Context (Config + TX Map)
+    config = load_config_from_files(files)
+    global_tx_map = common_lib.build_global_transformer_map(files)
+    
+    # 3. Build DataFrames
+    dfs = extract_data_from_memory(files)
+    
+    # 4. Solve Topology
     config_updated = topology_manager.resolve_all(config, dfs)
     
     results = []
@@ -99,8 +113,17 @@ async def run_global(
         res = {"plan_id": plan.id, "ansi_results": {}}
         for func in plan.active_functions:
             if func in AVAILABLE_ANSI_MODULES:
-                try: 
-                    res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(plan, config.settings, dfs)
+                try:
+                    # [FIX] Pass global_tx_map to all modules
+                    # Note: Modules must accept **kwargs or this specific arg
+                    res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(
+                        plan, config.settings, dfs, global_tx_map
+                    )
+                except TypeError:
+                    # Fallback for modules that don't support the new argument yet
+                    res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(
+                        plan, config.settings, dfs
+                    )
                 except Exception as e: 
                     res["ansi_results"][func] = {"error": str(e)}
         results.append(res)
