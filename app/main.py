@@ -2,9 +2,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
-# Import des routeurs (dont le nouveau debug)
 from .routers import files, admin, projects, storage_admin, debug 
-# Business logic imports...
+
+# Business logic imports
 try:
     from .routers import ingestion, loadflow, protection, inrush, extraction
 except ImportError:
@@ -12,7 +12,7 @@ except ImportError:
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Solufuse API", version="2.3.0")
+app = FastAPI(title="Solufuse API", version="2.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -22,18 +22,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(files.router, prefix="/session", tags=["Session"])
+# --- SYSTEM ROUTERS (Ceux que j'ai créés sans préfixe interne) ---
+# Eux, ils ont BESOIN du préfixe ici
+app.include_router(files.router, prefix="/session", tags=["Session (Legacy)"])
+app.include_router(files.router, prefix="/files", tags=["Files (Standard)"])
 app.include_router(admin.router, prefix="/admin", tags=["Global Admin"])
 app.include_router(storage_admin.router, prefix="/admin/storage", tags=["Storage"])
 app.include_router(projects.router, prefix="/projects", tags=["Projects"])
-app.include_router(debug.router, prefix="/debug", tags=["Debug"]) # <--- NEW
+app.include_router(debug.router, prefix="/debug", tags=["Debug"])
 
-if ingestion: app.include_router(ingestion.router, prefix="/ingestion", tags=["Ingestion"])
-if loadflow: app.include_router(loadflow.router, prefix="/loadflow", tags=["Loadflow"])
-if protection: app.include_router(protection.router, prefix="/protection", tags=["Protection"])
-if inrush: app.include_router(inrush.router, prefix="/inrush", tags=["Inrush"])
-if extraction: app.include_router(extraction.router, prefix="/extraction", tags=["Extraction"])
+# --- BUSINESS ROUTERS (Ceux qui ont déjà leur préfixe interne) ---
+# [FIX] On enlève 'prefix=...' car ils l'ont déjà dans leur fichier respectif
+if ingestion: app.include_router(ingestion.router) 
+if loadflow: app.include_router(loadflow.router)
+if protection: app.include_router(protection.router)
+if inrush: app.include_router(inrush.router)
+if extraction: app.include_router(extraction.router)
 
 @app.get("/")
 def read_root():
-    return {"status": "Online", "debug_mode": True}
+    return {"status": "Online", "routing_fix": "Applied"}
