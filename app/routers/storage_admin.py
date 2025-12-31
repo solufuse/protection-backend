@@ -6,130 +6,60 @@ from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import User, Project
 from ..auth import get_current_user
-from pydantic import BaseModel
-from typing import List, Dict
 
 router = APIRouter()
+STORAGE_ROOT = "/app/storage"
 
-# [CONFIGURATION]
-# Doit correspondre exactement à BASE_STORAGE dans guest_guard.py
-STORAGE_ROOT = "/app/storage" 
-
-# --- HELPER: CALCUL TAILLE DOSSIER ---
-def get_size(start_path = '.'):
-    total_size = 0
-    for dirpath, dirnames, filenames in os.walk(start_path):
-        for f in filenames:
-            fp = os.path.join(dirpath, f)
-            if not os.path.islink(fp):
-                total_size += os.path.getsize(fp)
-    return total_size
-
-def format_bytes(size):
-    power = 2**10
-    n = 0
-    power_labels = {0 : '', 1: 'K', 2: 'M', 3: 'G', 4: 'T'}
-    while size > power:
-        size /= power
-        n += 1
-    return f"{size:.2f} {power_labels[n]}B"
-
-# --- DEPENDENCY: SUPER ADMIN ONLY ---
 def require_super_admin(user: User = Depends(get_current_user)):
     if not user or user.global_role != "super_admin":
-        raise HTTPException(status_code=403, detail="Storage Admin Access Required")
+        raise HTTPException(status_code=403, detail="Accès admin stockage requis")
     return user
 
-# 1. GLOBAL STATS (Dashboard View)
-@router.get("/stats", dependencies=[Depends(require_super_admin)])
-def get_storage_stats():
-    # Création du dossier s'il n'existe pas (pour éviter l'erreur au premier lancement)
-    if not os.path.exists(STORAGE_ROOT):
-        try:
-            os.makedirs(STORAGE_ROOT, exist_ok=True)
-        except OSError:
-            return {"error": "Storage root not found and cannot be created", "path": STORAGE_ROOT}
-    
-    total_size = get_size(STORAGE_ROOT)
-    
-    # Scan projects (dossiers uniquement)
-    projects_on_disk = [d for d in os.listdir(STORAGE_ROOT) if os.path.isdir(os.path.join(STORAGE_ROOT, d))]
-    
-    # Disk Usage global du volume
+def get_dir_size(path):
+    total = 0
     try:
-        usage = shutil.disk_usage(STORAGE_ROOT)
-    except:
-        usage = "unknown"
+        for entry in os.scandir(path):
+            if entry.is_file(): total += entry.stat().st_size
+            elif entry.is_dir(): total += get_dir_size(entry.path)
+    except: pass
+    return total
 
+@router.get("/stats", dependencies=[Depends(require_super_admin)])
+def get_global_storage_stats():
+    """Donne une vue d'ensemble de l'utilisation du disque."""
+    if not os.path.exists(STORAGE_ROOT): return {"error": "Root missing"}
+    
+    total, used, free = shutil.disk_usage(STORAGE_ROOT)
+    app_usage = get_dir_size(STORAGE_ROOT)
+    
     return {
-        "root_path": STORAGE_ROOT,
-        "total_size_raw": total_size,
-        "total_size_fmt": format_bytes(total_size),
-        "total_folders": len(projects_on_disk),
-        "disk_usage": usage
+        "disk_total_gb": total // (2**30),
+        "disk_free_gb": free // (2**30),
+        "app_usage_mb": round(app_usage / (2**20), 2),
+        "projects_folders": len([d for d in os.listdir(STORAGE_ROOT) if os.path.isdir(os.path.join(STORAGE_ROOT, d))])
     }
 
-# 2. LIST ALL FOLDERS (Physical vs DB Audit)
 @router.get("/audit", dependencies=[Depends(require_super_admin)])
-def audit_storage(db: Session = Depends(get_db)):
-    if not os.path.exists(STORAGE_ROOT):
-        return []
+def storage_audit(db: Session = Depends(get_db)):
+    """Identifie les dossiers qui ne sont plus reliés à rien en base de données."""
+    if not os.path.exists(STORAGE_ROOT): return []
 
-    # A. Ce qu'il y a sur le DISQUE
-    disk_projects = []
-    try:
-        for item in os.listdir(STORAGE_ROOT):
-            item_path = os.path.join(STORAGE_ROOT, item)
-            # On ne liste que les dossiers (les UIDs sont des dossiers)
-            if os.path.isdir(item_path):
-                size = get_size(item_path)
-                disk_projects.append({
-                    "id": item,
-                    "size_fmt": format_bytes(size),
-                    "size_raw": size,
-                    "status": "unknown"
-                })
-    except Exception as e:
-        raise HTTPException(500, f"Disk Scan Error: {str(e)}")
-
-    # B. Ce qu'il y a dans la DB
-    # On récupère tous les IDs de Users et de Projets pour comparer
-    # (Note: Dans ton système actuel, les dossiers s'appellent par l'UID du user pour le stockage invité)
+    # Liste des IDs valides (Projets et Users pour le mode session)
+    known_project_ids = {p.id for p in db.query(Project).all()}
+    known_user_uids = {u.firebase_uid for u in db.query(User).all()}
     
-    # Liste des UIDs connus (Users)
-    db_users = db.query(User).all()
-    known_ids = {u.firebase_uid for u in db_users}
-    
-    # Liste des IDs de projets (si les projets ont leur propre dossier séparé)
-    db_projects = db.query(Project).all()
-    known_ids.update({p.id for p in db_projects})
-
-    # C. Comparaison
-    result = []
-    for p in disk_projects:
-        # Si le nom du dossier correspond à un UID User ou un ID Projet
-        if p["id"] in known_ids:
-            p["status"] = "active"
-        else:
-            p["status"] = "orphan" 
-        result.append(p)
+    audit_results = []
+    for folder_name in os.listdir(STORAGE_ROOT):
+        folder_path = os.path.join(STORAGE_ROOT, folder_name)
+        if not os.path.isdir(folder_path): continue
         
-    return result
-
-# 3. DELETE FOLDER (Force Cleanup)
-@router.delete("/{folder_id}", dependencies=[Depends(require_super_admin)])
-def force_delete_folder(folder_id: str):
-    # Sécurité
-    if ".." in folder_id or folder_id.startswith("/") or folder_id in [".", "lost+found"]:
-        raise HTTPException(400, "Invalid folder ID")
-        
-    target_path = os.path.join(STORAGE_ROOT, folder_id)
-    
-    if not os.path.exists(target_path):
-        raise HTTPException(404, "Folder not found on disk")
-        
-    try:
-        shutil.rmtree(target_path)
-        return {"status": "deleted", "path": target_path}
-    except Exception as e:
-        raise HTTPException(500, f"Delete failed: {str(e)}")
+        status = "active"
+        if folder_name not in known_project_ids and folder_name not in known_user_uids:
+            status = "orphan" # Dossier inutile
+            
+        audit_results.append({
+            "folder": folder_name,
+            "size_mb": round(get_dir_size(folder_path) / (2**20), 2),
+            "status": status
+        })
+    return audit_results
