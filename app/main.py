@@ -7,28 +7,36 @@ from sqlalchemy import text # Required for the DB fix
 
 # [structure:root] : Application entry point with dynamic imports and DB auto-migration.
 
-# --- 1. AUTO-MIGRATION (CRITICAL FIX) ---
+# --- 1. AUTO-MIGRATION & DATA REPAIR ---
 def run_migrations():
     """
-    [!] [CRITICAL] Adds 'is_active' and 'created_at' columns if they are missing.
-    This allows updating the DB schema without deleting existing users or the database file.
+    [!] [CRITICAL] Database Repair Kit.
+    1. Adds missing columns (is_active, created_at).
+    2. Backfills NULL dates with the current timestamp to ensure cleanup scripts work.
     """
     try:
         with engine.connect() as connection:
-            # Fix: is_active
+            # A. Schema Patches
             try:
                 connection.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1"))
-                print("✅ [MIGRATION] Column 'is_active' successfully added.")
-            except Exception as e:
-                # If error contains "duplicate column", it means it's already there.
-                if "duplicate column" not in str(e).lower(): print(f"ℹ️ [MIGRATION] Info: {e}")
+            except Exception: pass # Column likely exists
 
-            # Fix: created_at
             try:
                 connection.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
-                print("✅ [MIGRATION] Column 'created_at' successfully added.")
+            except Exception: pass # Column likely exists
+            
+            # B. Data Backfill (The Fix for your 'null' issue)
+            # Sets 'created_at' to NOW for any user who has it as NULL.
+            try:
+                connection.execute(text("UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"))
+                print("✅ [DATA FIX] Null timestamps updated to current time.")
             except Exception as e:
-                if "duplicate column" not in str(e).lower(): print(f"ℹ️ [MIGRATION] Info: {e}")
+                print(f"ℹ️ [DATA FIX] Info: {e}")
+
+            # C. Active Status Backfill
+            try:
+                connection.execute(text("UPDATE users SET is_active = 1 WHERE is_active IS NULL"))
+            except Exception: pass
                     
             connection.commit()
     except Exception as global_e:
@@ -37,11 +45,11 @@ def run_migrations():
 # Run repair BEFORE creating the app
 run_migrations()
 
-# --- 2. ROBUST IMPORTS (Business Logic) ---
+# --- 2. ROBUST IMPORTS ---
 try:
     from .routers import ingestion, loadflow, protection, inrush, extraction
 except ImportError:
-    print("⚠️ [WARNING] Some business modules could not be loaded (missing files?).")
+    print("⚠️ [WARNING] Some business modules could not be loaded.")
     ingestion = loadflow = protection = inrush = extraction = None
 
 # Ensure standard tables exist
@@ -59,14 +67,14 @@ app.add_middleware(
 
 # --- 3. ROUTING ---
 
-# Core Routes (System & Admin)
+# Core Routes
 app.include_router(files.router, prefix="/files", tags=["Files (Standard)"])
 app.include_router(admin.router, prefix="/admin", tags=["Global Admin"])
 app.include_router(storage_admin.router, prefix="/admin/storage", tags=["Storage"])
 app.include_router(projects.router, prefix="/projects", tags=["Projects"])
 app.include_router(debug.router, prefix="/debug", tags=["Debug"])
 
-# Business Routes (Calculation Engines)
+# Business Routes
 if ingestion: app.include_router(ingestion.router)
 if loadflow: app.include_router(loadflow.router)
 if protection: app.include_router(protection.router)

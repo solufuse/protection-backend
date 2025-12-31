@@ -5,9 +5,11 @@ from sqlalchemy.orm import Session
 from .database import get_db
 from .models import User, ProjectMember
 from firebase_admin import auth as firebase_auth
+from datetime import datetime
 
 security = HTTPBearer(auto_error=False)
 
+# AI-REMARK: GLOBAL ROLES (Backend Level)
 GLOBAL_LEVELS = {
     "super_admin": 100,
     "admin": 80,
@@ -17,6 +19,7 @@ GLOBAL_LEVELS = {
     "guest": 0
 }
 
+# AI-REMARK: PROJECT ROLES (Local Level)
 PROJECT_LEVELS = {
     "owner": 50,
     "admin": 40,
@@ -26,25 +29,33 @@ PROJECT_LEVELS = {
 }
 
 async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
+    # [+] [INFO] Hybrid Authentication (Header Bearer or ?token=)
     token = creds.credentials if creds else request.query_params.get("token")
     
     if not token:
-        raise HTTPException(status_code=401, detail="Authentification requise")
+        raise HTTPException(status_code=401, detail="Authentication required")
 
     try:
         decoded = firebase_auth.verify_id_token(token)
         uid, email = decoded['uid'], decoded.get('email')
     except:
-        raise HTTPException(status_code=401, detail="Session expirée ou invalide")
+        raise HTTPException(status_code=401, detail="Session expired or invalid")
 
     user = db.query(User).filter(User.firebase_uid == uid).first()
     if not user:
-        user = User(firebase_uid=uid, email=email, global_role="user")
+        # [?] [THOUGHT] Force creation time in Python to avoid DB Null issues
+        user = User(
+            firebase_uid=uid, 
+            email=email, 
+            global_role="user",
+            created_at=datetime.utcnow(), # Explicit timestamp
+            is_active=True
+        )
         db.add(user); db.commit(); db.refresh(user)
 
-    # [!] [CRITICAL] Vérification du bannissement
+    # [!] [CRITICAL] Ban Check
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="Votre compte a été suspendu. Contactez le support.")
+        raise HTTPException(status_code=403, detail="Account suspended. Contact support.")
 
     return user
 
@@ -60,8 +71,8 @@ class ProjectAccessChecker:
         ).first()
 
         if not membership:
-            raise HTTPException(status_code=403, detail="Accès au projet refusé")
+            raise HTTPException(status_code=403, detail="Access denied to this project")
 
         if PROJECT_LEVELS.get(membership.project_role, 0) < PROJECT_LEVELS.get(self.required_role, 0):
-            raise HTTPException(status_code=403, detail=f"Action requérant le rang {self.required_role}")
+            raise HTTPException(status_code=403, detail=f"Action requires role {self.required_role}")
         return True
