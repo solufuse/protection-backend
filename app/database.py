@@ -1,30 +1,32 @@
 
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-import os
 
-# [context:config] : Database URL. Defaults to a local SQLite file if not provided.
-# In production, set DATABASE_URL env var to: postgresql://user:pass@host/db
-SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./storage.db")
+# --- CONFIGURATION PERSISTANTE ---
+# Au lieu de mettre la DB dans le dossier courant (qui est effacé à chaque deploy),
+# on la met dans /app/storage qui est un Volume Docker persistant.
 
-# [decision:logic] : SQLite needs "check_same_thread=False" to work with FastAPI's async nature.
-connect_args = {}
-if "sqlite" in SQLALCHEMY_DATABASE_URL:
-    connect_args = {"check_same_thread": False}
+PERSISTENT_DIR = "/app/storage"
 
-# [structure:engine] : The main entry point to the database.
+# Création du dossier si nécessaire (pour éviter crash au démarrage)
+if not os.path.exists(PERSISTENT_DIR):
+    os.makedirs(PERSISTENT_DIR, exist_ok=True)
+
+# Le fichier s'appelle maintenant protection.db et est stocké en sécurité
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{PERSISTENT_DIR}/protection.db"
+
+# connect_args={"check_same_thread": False} est nécessaire pour SQLite
 engine = create_engine(
-    SQLALCHEMY_DATABASE_URL, connect_args=connect_args
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
 )
 
-# [structure:session] : Factory to create new database sessions for each request.
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# [structure:orm] : Base class for all DB models (User, Project, etc.)
 Base = declarative_base()
 
-# [+] [INFO] Dependency to be used in FastAPI routes to get a DB session.
+# Dependency standard pour récupérer la DB dans les routes
 def get_db():
     db = SessionLocal()
     try:
