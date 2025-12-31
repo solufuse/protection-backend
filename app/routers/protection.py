@@ -21,7 +21,6 @@ router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
 router.include_router(ansi_51_router.router)
 router.include_router(common_router.router)
 
-# --- [HELPER] V2 Path Resolution ---
 def resolve_protection_path(user, project_id: Optional[str], db: Session) -> str:
     if project_id:
         checker = ProjectAccessChecker(required_role="viewer")
@@ -42,7 +41,8 @@ def load_data_from_disk(path: str) -> Dict[str, pd.DataFrame]:
     if not os.path.exists(path): return {}
     
     for f in os.listdir(path):
-        if f.lower().endswith(('.si2s', '.mdb', '.lf1s')):
+        # [FIX] Strict filter: Only .si2s and .mdb (No .lf1s)
+        if f.lower().endswith(('.si2s', '.mdb')):
             full_path = os.path.join(path, f)
             try:
                 with open(full_path, "rb") as file_obj:
@@ -65,11 +65,9 @@ def load_data_from_disk(path: str) -> Dict[str, pd.DataFrame]:
 
 def load_config_from_disk(path: str) -> ProjectConfig:
     config_path = os.path.join(path, "config.json")
-    
-    # Fallback search
     if not os.path.exists(config_path):
         for f in os.listdir(path):
-            if f.endswith(".json") and "lf_results" not in f: # Avoid loadflow results
+            if f.endswith(".json") and "lf_results" not in f:
                 config_path = os.path.join(path, f)
                 break
     
@@ -83,23 +81,16 @@ def load_config_from_disk(path: str) -> ProjectConfig:
     except Exception as e:
         raise HTTPException(422, f"Config Error: {str(e)}")
 
-# --- ROUTES ---
-
 @router.post("/run")
 async def run_global(
     project_id: Optional[str] = Query(None),
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # 1. Resolve Path
     target_dir = resolve_protection_path(user, project_id, db)
-    
-    # 2. Load Data (Config + Networks)
     config = load_config_from_disk(target_dir)
     dfs = load_data_from_disk(target_dir)
     
-    # 3. Resolve Topology & Calculate
-    # [?] [THOUGHT] Topology Manager links the JSON config plans to the actual Network DataFrames
     config_updated = topology_manager.resolve_all(config, dfs)
     
     results = []
