@@ -57,78 +57,40 @@ def get_config_from_files(files: Dict[str, bytes]) -> ProjectConfig:
 
 def run_batch_internal(config: ProjectConfig, files: Dict[str, bytes]):
     results = []
-    
-    # 1. Build Global Map (REQUIRED by library)
     global_tx_map = common_lib.build_global_transformer_map(files)
-
     net_files = {k: v for k, v in files.items() if is_protection_file(k)}
     
     for fname, content in net_files.items():
         dfs = db_converter.extract_data_from_db(content)
         if not dfs: continue
-        
         topology_manager.resolve_all(config, dfs)
-        
         for plan in config.plans:
             if "51" in plan.active_functions or "ANSI 51" in plan.active_functions:
                 try:
-                    # [CRITICAL FIX HERE]
-                    # - 2nd Arg: 'config' (ProjectConfig), NOT config.settings
-                    # - 4th Arg: 'global_tx_map' (Required)
                     res = ansi_51.calculate(plan, config, dfs, global_tx_map)
-                    
-                    results.append({
-                        "file": fname,
-                        "plan_id": plan.id,
-                        "status": "success",
-                        "data_51": res
-                    })
+                    results.append({"file": fname, "plan_id": plan.id, "status": "success", "data_51": res})
                 except Exception as e:
-                    results.append({
-                        "file": fname, 
-                        "plan_id": plan.id, 
-                        "status": "error", 
-                        "error": str(e)
-                    })
+                    results.append({"file": fname, "plan_id": plan.id, "status": "error", "error": str(e)})
     return results
 
 @router.post("/run")
-async def run_ansi_51_only(
-    include_data: bool = False, 
-    project_id: Optional[str] = Query(None),
-    user = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def run_ansi_51_only(include_data: bool = False, project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
     path = get_storage_path(user, project_id, db)
     files = load_workspace_files(path)
     if not files: raise HTTPException(400, "Workspace empty")
-    
     config = get_config_from_files(files)
     final_results = run_batch_internal(config, files)
-
     return {"status": "success", "total_scenarios": len(final_results), "results": final_results}
 
 @router.get("/export")
-async def export_ansi_51(
-    format: str = "xlsx", 
-    project_id: Optional[str] = Query(None),
-    user = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def export_ansi_51(format: str = "xlsx", project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
     path = get_storage_path(user, project_id, db)
     files = load_workspace_files(path)
     config = get_config_from_files(files)
     results = run_batch_internal(config, files)
-    
     if format == "json":
         return JSONResponse({"results": results}, headers={"Content-Disposition": "attachment; filename=ansi_51.json"})
-    
     try:
         excel_bytes = ansi_51.generate_excel(results)
-        return StreamingResponse(
-            io.BytesIO(excel_bytes),
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": "attachment; filename=ansi_51.xlsx"}
-        )
-    except AttributeError:
-        return JSONResponse({"error": "Excel export not available"}, status_code=501)
+        return StreamingResponse(io.BytesIO(excel_bytes), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=ansi_51.xlsx"})
+    except: return JSONResponse({"error": "Excel export not available"}, status_code=501)

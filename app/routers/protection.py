@@ -61,9 +61,7 @@ def extract_data_from_memory(files: Dict[str, bytes]) -> Dict[str, pd.DataFrame]
                         if t not in merged: merged[t] = []
                         df['SourceFilename'] = f 
                         merged[t].append(df)
-            except Exception as e:
-                print(f"[Warn] Skipped {f}: {e}")
-
+            except: pass
     final = {}
     for k, v in merged.items():
         try: final[k] = pd.concat(v, ignore_index=True)
@@ -76,34 +74,20 @@ def load_config_from_files(files: Dict[str, bytes]) -> ProjectConfig:
         for n, c in files.items():
             if n.lower().endswith(".json") and "lf_results" not in n:
                 tgt = c; break
-    
     if not tgt: raise HTTPException(404, "config.json not found")
-    
-    try:
-        return ProjectConfig(**json.loads(tgt))
-    except Exception as e:
-        raise HTTPException(422, f"Config Error: {str(e)}")
+    try: return ProjectConfig(**json.loads(tgt))
+    except Exception as e: raise HTTPException(422, f"Config Error: {str(e)}")
 
 @router.post("/run")
-async def run_global(
-    project_id: Optional[str] = Query(None),
-    user = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
+async def run_global(project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
     target_dir = resolve_protection_path(user, project_id, db)
-    
-    # 1. Load Data
     files = load_workspace_files(target_dir)
     if not files: raise HTTPException(400, "Workspace empty")
 
-    # 2. Context
     config = load_config_from_files(files)
     global_tx_map = common_lib.build_global_transformer_map(files)
-    
-    # 3. DataFrames
     dfs = extract_data_from_memory(files)
     
-    # 4. Calculate
     config_updated = topology_manager.resolve_all(config, dfs)
     
     results = []
@@ -112,17 +96,10 @@ async def run_global(
         for func in plan.active_functions:
             if func in AVAILABLE_ANSI_MODULES:
                 try:
-                    # [CRITICAL FIX] Pass 'config' (ProjectConfig) and 'global_tx_map'
-                    res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(
-                        plan, config, dfs, global_tx_map
-                    )
+                    res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(plan, config, dfs, global_tx_map)
                 except TypeError:
-                    # Fallback au cas où un autre module n'est pas encore à jour
-                    res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(
-                        plan, config.settings, dfs
-                    )
+                    res["ansi_results"][func] = AVAILABLE_ANSI_MODULES[func].calculate(plan, config.settings, dfs)
                 except Exception as e: 
                     res["ansi_results"][func] = {"error": str(e)}
         results.append(res)
-        
     return {"status": "success", "results": results}
