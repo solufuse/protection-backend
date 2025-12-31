@@ -43,12 +43,15 @@ async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials
 
     user = db.query(User).filter(User.firebase_uid == uid).first()
     if not user:
-        # [?] [THOUGHT] Force creation time in Python to avoid DB Null issues
+        # [decision:logic] Determine initial role based on email presence
+        # If no email, it is a Guest (Level 0). Otherwise, standard User (Level 20).
+        initial_role = "user" if email else "guest"
+        
         user = User(
             firebase_uid=uid, 
             email=email, 
-            global_role="user",
-            created_at=datetime.utcnow(), # Explicit timestamp
+            global_role=initial_role,
+            created_at=datetime.utcnow(),
             is_active=True
         )
         db.add(user); db.commit(); db.refresh(user)

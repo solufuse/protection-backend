@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
 from .routers import files, admin, projects, storage_admin, debug
-from sqlalchemy import text # Required for the DB fix
+from sqlalchemy import text 
 
 # [structure:root] : Application entry point with dynamic imports and DB auto-migration.
 
@@ -11,32 +11,32 @@ from sqlalchemy import text # Required for the DB fix
 def run_migrations():
     """
     [!] [CRITICAL] Database Repair Kit.
-    1. Adds missing columns (is_active, created_at).
-    2. Backfills NULL dates with the current timestamp to ensure cleanup scripts work.
+    1. Adds missing columns.
+    2. Backfills NULL dates.
+    3. [NEW] Converts nameless 'users' to 'guest' role.
     """
     try:
         with engine.connect() as connection:
-            # A. Schema Patches
-            try:
-                connection.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1"))
-            except Exception: pass # Column likely exists
-
-            try:
-                connection.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
-            except Exception: pass # Column likely exists
+            # A. Schema Patches (Columns)
+            try: connection.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1"))
+            except Exception: pass 
+            try: connection.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
+            except Exception: pass 
             
-            # B. Data Backfill (The Fix for your 'null' issue)
-            # Sets 'created_at' to NOW for any user who has it as NULL.
+            # B. Data Backfill (Timestamps & Active)
+            try: connection.execute(text("UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"))
+            except Exception: pass
+            try: connection.execute(text("UPDATE users SET is_active = 1 WHERE is_active IS NULL"))
+            except Exception: pass
+
+            # C. [NEW] Guest Role Correction
+            # If email is NULL and role is 'user', switch them to 'guest'
             try:
-                connection.execute(text("UPDATE users SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL"))
-                print("✅ [DATA FIX] Null timestamps updated to current time.")
+                result = connection.execute(text("UPDATE users SET global_role = 'guest' WHERE email IS NULL AND global_role = 'user'"))
+                if result.rowcount > 0:
+                    print(f"✅ [DATA FIX] Converted {result.rowcount} anonymous users to 'guest' role.")
             except Exception as e:
                 print(f"ℹ️ [DATA FIX] Info: {e}")
-
-            # C. Active Status Backfill
-            try:
-                connection.execute(text("UPDATE users SET is_active = 1 WHERE is_active IS NULL"))
-            except Exception: pass
                     
             connection.commit()
     except Exception as global_e:
@@ -55,7 +55,7 @@ except ImportError:
 # Ensure standard tables exist
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Solufuse API", version="2.6.0")
+app = FastAPI(title="Solufuse API", version="2.6.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,4 +82,4 @@ if inrush: app.include_router(inrush.router)
 if extraction: app.include_router(extraction.router)
 
 @app.get("/")
-def read_root(): return {"status": "Online", "version": "2.6.0"}
+def read_root(): return {"status": "Online", "version": "2.6.1"}
