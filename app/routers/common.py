@@ -1,38 +1,89 @@
 
+import os
+import json
+import copy
+from typing import Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+
 from app.core.security import get_current_token
-from app.services import session_manager
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
 from app.calculations.ansi_code import common as common_lib
-import json, copy
-from typing import Optional
+
+from ..database import get_db
+from ..auth import get_current_user, ProjectAccessChecker
+from ..guest_guard import check_guest_restrictions
 
 router = APIRouter(prefix="/common", tags=["Common Analysis"])
 
-def get_config(target, is_proj) -> ProjectConfig:
-    files = session_manager.get_files(target, is_proj)
-    if not files: raise HTTPException(400, "Empty")
+# --- [HELPER] Path Resolution V2 ---
+def get_storage_path(user, project_id: Optional[str], db: Session) -> str:
+    if project_id:
+        checker = ProjectAccessChecker(required_role="viewer")
+        checker(project_id, user, db)
+        path = os.path.join("/app/storage", project_id)
+        if not os.path.exists(path): raise HTTPException(404, "Project folder missing")
+        return path
+    else:
+        # Guest Mode
+        uid = user.firebase_uid
+        is_guest = False
+        try: 
+            if not user.email: is_guest = True
+        except: pass
+        return check_guest_restrictions(uid, is_guest, action="read")
+
+def load_workspace_files(path: str) -> Dict[str, bytes]:
+    files = {}
+    if not os.path.exists(path): return files
+    for f in os.listdir(path):
+        full_path = os.path.join(path, f)
+        if os.path.isfile(full_path):
+            try:
+                with open(full_path, "rb") as file_obj:
+                    files[f] = file_obj.read()
+            except: pass
+    return files
+
+def get_config_from_files(files: Dict[str, bytes]) -> ProjectConfig:
     tgt = files.get("config.json")
+    # Fallback search
     if not tgt:
         for n, c in files.items():
             if n.lower().endswith(".json"): tgt = c; break
-    if not tgt: raise HTTPException(404, "No config")
-    try: return ProjectConfig(**json.loads(tgt))
-    except: raise HTTPException(422, "Invalid Config")
+    if not tgt: raise HTTPException(404, "No config.json found")
+    
+    try: 
+        return ProjectConfig(**json.loads(tgt))
+    except Exception as e: 
+        raise HTTPException(422, f"Invalid Config: {str(e)}")
+
+# --- ROUTES ---
 
 @router.post("/run")
-async def run(include_data: bool = False, token: str = Depends(get_current_token), project_id: Optional[str] = Query(None)):
-    target, is_proj = (project_id, True) if project_id else (token, False)
-    if is_proj and not session_manager.can_access_project(token, project_id): raise HTTPException(403, "Access Denied")
+async def run(
+    include_data: bool = False, 
+    project_id: Optional[str] = Query(None),
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # 1. Access Disk
+    target_path = get_storage_path(user, project_id, db)
+    files = load_workspace_files(target_path)
+    
+    if not files: raise HTTPException(400, "Workspace empty")
 
-    config = get_config(target, is_proj)
-    files = session_manager.get_files(target, is_proj)
+    # 2. Config & Global Map
+    config = get_config_from_files(files)
     global_tx = common_lib.build_global_transformer_map(files)
+    
     results = []
     
+    # 3. Calculation Loop
     for fname, content in files.items():
         if not common_lib.is_supported_protection(fname): continue
+        
         dfs = db_converter.extract_data_from_db(content)
         if not dfs: continue
         
@@ -48,4 +99,5 @@ async def run(include_data: bool = False, token: str = Depends(get_current_token
                 results.append({"plan_id": plan.id, "file": fname, "common_data": data})
             except Exception as e:
                 results.append({"plan_id": plan.id, "file": fname, "error": str(e)})
+                
     return {"status": "success", "results": results}
