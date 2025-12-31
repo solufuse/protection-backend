@@ -8,8 +8,6 @@ from firebase_admin import auth as firebase_auth
 
 security = HTTPBearer(auto_error=False)
 
-# AI-REMARK: GLOBAL ROLES (Backend Level)
-# super_admin > admin > moderator > nitro > user > guest
 GLOBAL_LEVELS = {
     "super_admin": 100,
     "admin": 80,
@@ -19,8 +17,6 @@ GLOBAL_LEVELS = {
     "guest": 0
 }
 
-# AI-REMARK: PROJECT ROLES (Local Level)
-# owner > admin > moderator > editor > viewer
 PROJECT_LEVELS = {
     "owner": 50,
     "admin": 40,
@@ -30,7 +26,6 @@ PROJECT_LEVELS = {
 }
 
 async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
-    # [+] [INFO] Authentification hybride (Header Bearer ou ?token=)
     token = creds.credentials if creds else request.query_params.get("token")
     
     if not token:
@@ -44,19 +39,20 @@ async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials
 
     user = db.query(User).filter(User.firebase_uid == uid).first()
     if not user:
-        # [?] [THOUGHT] Nouvel utilisateur devient par défaut 'user'
         user = User(firebase_uid=uid, email=email, global_role="user")
         db.add(user); db.commit(); db.refresh(user)
+
+    # [!] [CRITICAL] Vérification du bannissement
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="Votre compte a été suspendu. Contactez le support.")
 
     return user
 
 class ProjectAccessChecker:
-    """ Vérifie les droits LOCAUX au sein d'un projet. """
     def __init__(self, required_role: str = "viewer"):
         self.required_role = required_role
 
     def __call__(self, project_id: str, user: User, db: Session):
-        # [!] [CRITICAL] Le Super-Admin outrepasse les droits locaux
         if user.global_role == "super_admin": return True
 
         membership = db.query(ProjectMember).filter(
