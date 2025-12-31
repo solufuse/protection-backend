@@ -1,57 +1,57 @@
 
 # 🛡️ Solufuse Permissions & Roles Reference
 
-Ce document recense les règles d'accès, les quotas et la hiérarchie implémentés dans le Backend (API v2.6+).
+This document outlines the access rules, quotas, and hierarchy implemented in the Backend (API v2.6+).
 
-## 1. Hiérarchie Globale (SaaS)
+## 1. Global Hierarchy (SaaS)
 
-| Rôle Global | Level | Description |
+| Global Role | Level | Description |
 | :--- | :--- | :--- |
-| **Guest** | 0 | Visiteur non connecté (Session temporaire uniquement). |
-| **User** | 20 | Utilisateur gratuit standard. |
-| **Nitro** | 40 | Utilisateur payant (Avantages stockage). |
-| **Moderator** | 60 | Staff : Peut voir et modérer, mais pas détruire. |
-| **Admin** | 80 | Staff : Pleins pouvoirs opérationnels (sauf DB). |
-| **Super Admin**| 100 | Fondateur : Pouvoirs absolus (accès DB, Logs). |
+| **Guest** | 0 | Not logged in (Temporary session only). |
+| **User** | 20 | Standard free user. |
+| **Nitro** | 40 | Paid user (Storage benefits). |
+| **Moderator** | 60 | Staff: Can view and moderate, but cannot destroy projects. |
+| **Admin** | 80 | Staff: Full operational powers (except DB deletion). |
+| **Super Admin**| 100 | Founder: Absolute powers (DB access, Logs). |
 
 ---
 
-## 2. Quotas de Stockage
+## 2. Storage Quotas
 
-Ces limites sont appliquées lors de la création de projets ou l'upload de fichiers.
+These limits are enforced during project creation or file uploads.
 
-| Rôle | Max Projets (SQL) | Max Fichiers (par dossier/session) |
+| Role | Max Projects (SQL) | Max Files (per folder/session) |
 | :--- | :--- | :--- |
-| **Guest** | 0 (Interdit) | 10 |
+| **Guest** | 0 (Forbidden) | 10 |
 | **User** | 1 | 100 |
 | **Nitro** | 10 | 1000 |
-| **Moderator+** | Illimité | Illimité |
+| **Moderator+** | Unlimited | Unlimited |
 
 ---
 
-## 3. Matrice des Droits (Projets)
+## 3. Rights Matrix (Projects)
 
 | Action | User / Nitro | Moderator | Admin | Super Admin |
 | :--- | :--- | :--- | :--- | :--- |
-| **Visibilité** | Ses projets uniquement | **TOUS** les projets (Vue Globale) | **TOUS** les projets | **TOUS** les projets |
-| **Création** | ✅ (Si quota OK) | ✅ | ✅ | ✅ |
-| **Suppression** | ✅ (Si Owner) | ❌ **REFUSÉ** | ✅ | ✅ |
-| **Invitation** | ✅ (Ses projets) | ✅ (Dans n'importe quel projet) | ✅ (Partout) | ✅ (Partout) |
-| **Expulsion** | ✅ (Ses projets) | ✅ (Partout, sauf grades > soi) | ✅ (Partout) | ✅ (Partout) |
+| **Visibility** | Their projects only | **ALL** projects (Global View) | **ALL** projects | **ALL** projects |
+| **Creation** | ✅ (If quota OK) | ✅ | ✅ | ✅ |
+| **Deletion** | ✅ (If Owner) | ❌ **DENIED** | ✅ | ✅ |
+| **Invitation** | ✅ (Their projects) | ✅ (In any project) | ✅ (Everywhere) | ✅ (Everywhere) |
+| **Kicking** | ✅ (Their projects) | ✅ (Everywhere, except ranks > self) | ✅ (Everywhere) | ✅ (Everywhere) |
 
 ---
 
-## 4. Règles de Sécurité Critiques (Hardcoded)
+## 4. Critical Security Rules (Hardcoded)
 
-### A. Protection des Fichiers Système
-* **Fichier `protection.db` (SQLite)** : 
-    * ❌ **Admin / Moderator / User** : Impossible de supprimer ce fichier via `/files/delete`.
-    * ✅ **Super Admin** : Autorisé (Maintenance critique uniquement).
+### A. System File Protection
+* **File `protection.db` (SQLite)**: 
+    * ❌ **Admin / Moderator / User**: Cannot delete this file via `/files/delete`.
+    * ✅ **Super Admin**: Authorized (Critical maintenance only).
 
-### B. Anti-Putsch (Hiérarchie)
-* Un utilisateur ne peut jamais modifier le rôle d'un supérieur hiérarchique.
-* Un utilisateur ne peut pas s'auto-promouvoir à un grade supérieur.
-* Un **Moderator** ne peut pas expulser (Kick) un **Admin** ou un **Owner** de projet.
+### B. Anti-Coup (Hierarchy)
+* A user can never modify the role of a hierarchical superior.
+* A user cannot self-promote to a higher rank.
+* A **Moderator** cannot kick an **Admin** or a Project **Owner**.
 
 ---
-*Dernière mise à jour : 31 Décembre 2025*
+*Last updated: December 31, 2025*
