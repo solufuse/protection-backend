@@ -11,6 +11,7 @@ from typing import List, Optional
 
 router = APIRouter()
 
+# --- SCHEMAS ---
 class ProjectCreate(BaseModel):
     id: str
     name: str
@@ -25,24 +26,36 @@ class MemberInvite(BaseModel):
 @router.get("/")
 def list_projects(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    [decision:logic] Visibility Rules:
-    - Super Admin, Admin, Moderator: See ALL projects.
-    - Nitro, User: See ONLY projects where they are members.
+    [decision:logic] Returns projects enriched with the user's role (owner vs member).
+    UI uses this to display the Crown icon 👑 for owners.
     """
     if not user: return []
+    results = []
     
-    # Staff Global (Moderator+) sees everything
+    # 1. Global Staff (Super Admin / Admin / Mod) sees ALL projects
     if GLOBAL_LEVELS.get(user.global_role, 0) >= 60:
-        return db.query(Project).all()
-        
-    # Standard Users see their memberships
-    return [m.project for m in user.project_memberships]
+        all_projs = db.query(Project).all()
+        for p in all_projs:
+            # Check if staff is explicitly a member, otherwise assign 'staff_override'
+            mem = db.query(ProjectMember).filter(ProjectMember.project_id == p.id, ProjectMember.user_id == user.id).first()
+            role = mem.project_role if mem else "admin"
+            results.append({"id": p.id, "name": p.name, "role": role})
+            
+    # 2. Standard Users (Nitro / User) see only their memberships
+    else:
+        for m in user.project_memberships:
+            results.append({"id": m.project.id, "name": m.project.name, "role": m.project_role})
+            
+    return results
 
 @router.post("/create")
 def create_project(project: ProjectCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Guests cannot create. Check Quotas.
+    """
+    [+] [INFO] Create project with Quota checks.
+    """
     if not user: raise HTTPException(401)
     
+    # Check Quotas
     user_quota = QUOTAS.get(user.global_role, QUOTAS["guest"])
     max_projects = user_quota["max_projects"]
     
@@ -53,33 +66,36 @@ def create_project(project: ProjectCreate, user: User = Depends(get_current_user
         
         if owned_count >= max_projects:
             if user.global_role == "guest": raise HTTPException(403, "Guests cannot create projects.")
-            elif user.global_role == "user": raise HTTPException(403, "Limit reached (1 Project). Upgrade to Nitro.")
-            else: raise HTTPException(403, f"Limit reached ({max_projects}).")
+            elif user.global_role == "user": raise HTTPException(403, "Free plan limit reached (1 Project). Upgrade to Nitro.")
+            else: raise HTTPException(403, f"Project limit reached ({max_projects}).")
 
+    # Check ID Uniqueness
     if db.query(Project).filter(Project.id == project.id).first():
         raise HTTPException(400, "Project ID already exists")
     
+    # Create Storage
     storage_path = f"/app/storage/{project.id}"
     if not os.path.exists(storage_path): os.makedirs(storage_path, exist_ok=True)
     
+    # Create DB Entry
     new_proj = Project(id=project.id, name=project.name, storage_path=storage_path)
     db.add(new_proj); db.commit()
     
+    # Assign Owner
     mem = ProjectMember(project_id=new_proj.id, user_id=user.id, project_role="owner")
     db.add(mem); db.commit()
-    return {"status": "created", "id": new_proj.id, "role": user.global_role}
+    
+    return {"status": "created", "id": new_proj.id, "role": "owner"}
 
 @router.delete("/{project_id}")
 def delete_project(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    [decision:logic] Delete Rules:
-    - Super Admin: YES
-    - Admin: YES
+    [decision:logic] Deletion Rules:
+    - Super Admin / Admin: YES
     - Owner: YES
-    - Moderator: NO (Can see but not delete)
+    - Moderator: NO (Read-only on structure)
     """
-    is_staff = user.global_role in ["super_admin", "admin"] # Moderator excluded from delete
-    
+    is_staff = user.global_role in ["super_admin", "admin"]
     member = db.query(ProjectMember).filter(ProjectMember.project_id==project_id, ProjectMember.user_id==user.id).first()
     is_owner = member and member.project_role == "owner"
     
@@ -99,21 +115,14 @@ def delete_project(project_id: str, user: User = Depends(get_current_user), db: 
 @router.post("/{project_id}/members")
 def invite_or_update_member(project_id: str, invite: MemberInvite, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    [decision:logic] Invite Rules:
-    - Super Admin, Admin, Moderator: Can invite/update ANYONE in ANY project.
-    - Project Owner/Admin: Can invite to their project.
+    [+] [INFO] Add or Update project member.
     """
-    
-    # 1. Global Staff Bypass (Super Admin, Admin, Moderator)
+    # Global Staff Bypass
     is_global_staff = GLOBAL_LEVELS.get(user.global_role, 0) >= 60
-    
     if not is_global_staff:
-        # Standard Check: Must be Project Moderator+
+        # Standard: Must be at least Project Moderator
         checker = ProjectAccessChecker(required_role="moderator")
         checker(project_id, user, db)
-
-    # 2. Logic to prevent Moderators from promoting to Admin if they are not Admin themselves
-    # (Skipped for Global Staff who have power)
     
     target_user = None
     if invite.user_id: target_user = db.query(User).filter(User.firebase_uid == invite.user_id).first()
@@ -134,19 +143,29 @@ def invite_or_update_member(project_id: str, invite: MemberInvite, user: User = 
 
 @router.get("/{project_id}/members")
 def list_project_members(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Global Staff can always see members
+    """
+    [+] [INFO] Lists members. 
+    [decision:logic] Includes 'global_role' so Frontend can display badges (Admin/Nitro).
+    """
     if GLOBAL_LEVELS.get(user.global_role, 0) < 60:
         checker = ProjectAccessChecker(required_role="viewer")
         checker(project_id, user, db)
         
     members = db.query(ProjectMember).filter(ProjectMember.project_id == project_id).all()
-    return [{"uid": m.user.firebase_uid, "email": m.user.email, "role": m.project_role} for m in members]
+    
+    return [{
+        "uid": m.user.firebase_uid, 
+        "email": m.user.email, 
+        "role": m.project_role,
+        "global_role": m.user.global_role 
+    } for m in members]
 
 @router.delete("/{project_id}/members/{target_uid}")
 def kick_member(project_id: str, target_uid: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Global Staff can kick anyone (except Super Admin owners)
+    """
+    [+] [INFO] Kick a member from the project.
+    """
     is_global_staff = GLOBAL_LEVELS.get(user.global_role, 0) >= 60
-    
     if not is_global_staff:
         checker = ProjectAccessChecker(required_role="moderator")
         checker(project_id, user, db)
@@ -157,6 +176,7 @@ def kick_member(project_id: str, target_uid: str, user: User = Depends(get_curre
     membership = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == target_user.id).first()
     if not membership: raise HTTPException(404, "Member not found")
     
+    # Protection: Cannot kick Owner
     if membership.project_role == "owner": raise HTTPException(403, "Cannot kick the Owner")
     
     # Protection: Admin cannot kick Super Admin
