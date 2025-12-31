@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.schemas.protection import ProjectConfig
 from app.calculations.ansi_code import ansi_51
-from app.calculations.ansi_code import common as common_lib # [NEW IMPORT]
+from app.calculations.ansi_code import common as common_lib
 from app.calculations import db_converter, topology_manager
 from app.calculations.file_utils import is_protection_file
 
@@ -58,9 +58,10 @@ def get_config_from_files(files: Dict[str, bytes]) -> ProjectConfig:
 def run_batch_internal(config: ProjectConfig, files: Dict[str, bytes]):
     results = []
     
-    # [FIX] 1. Build Global Transformer Map
+    # 1. Build Global Map (Crucial Fix)
     global_tx_map = common_lib.build_global_transformer_map(files)
 
+    # 2. Filter Files
     net_files = {k: v for k, v in files.items() if is_protection_file(k)}
     
     for fname, content in net_files.items():
@@ -72,7 +73,7 @@ def run_batch_internal(config: ProjectConfig, files: Dict[str, bytes]):
         for plan in config.plans:
             if "51" in plan.active_functions or "ANSI 51" in plan.active_functions:
                 try:
-                    # [FIX] 2. Pass global_tx_map to calculate
+                    # 3. Pass Map to Calculate (Crucial Fix)
                     res = ansi_51.calculate(plan, config.settings, dfs, global_tx_map)
                     results.append({
                         "file": fname,
