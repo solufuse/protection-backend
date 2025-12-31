@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import User, Project, ProjectMember
-from ..auth import get_current_user, ProjectAccessChecker, GLOBAL_LEVELS, PROJECT_LEVELS
+from ..auth import get_current_user, ProjectAccessChecker, GLOBAL_LEVELS, PROJECT_LEVELS, QUOTAS
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -25,7 +25,7 @@ class MemberInvite(BaseModel):
 
 @router.get("/")
 def list_projects(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    #
+    # Returns all projects for Super Admin, or only member projects for others
     if not user: return []
     if user.global_role == "super_admin": 
         return db.query(Project).all()
@@ -33,34 +33,61 @@ def list_projects(user: User = Depends(get_current_user), db: Session = Depends(
 
 @router.post("/create")
 def create_project(project: ProjectCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    #
+    """
+    [+] [INFO] Creates a new project with Quota Checks.
+    [decision:logic] Guests cannot create projects. Users limited to 1. Nitro to 10.
+    """
     if not user: raise HTTPException(401)
-    if db.query(Project).filter(Project.id == project.id).first():
-        raise HTTPException(400, "Project ID exists")
     
+    # 1. Check Global Quotas
+    user_quota = QUOTAS.get(user.global_role, QUOTAS["guest"])
+    max_projects = user_quota["max_projects"]
+    
+    # [!] [CRITICAL] Block if limit reached (unless unlimited with -1)
+    if max_projects != -1:
+        # Count owned projects
+        owned_count = 0
+        for m in user.project_memberships:
+            if m.project_role == "owner":
+                owned_count += 1
+        
+        if owned_count >= max_projects:
+            if user.global_role == "guest":
+                raise HTTPException(403, "Guests cannot create projects. Please create an account.")
+            elif user.global_role == "user":
+                raise HTTPException(403, "Free plan limit reached (1 Project). Upgrade to Nitro.")
+            else:
+                raise HTTPException(403, f"Project limit reached ({max_projects}).")
+
+    # 2. Check ID Uniqueness
+    if db.query(Project).filter(Project.id == project.id).first():
+        raise HTTPException(400, "Project ID already exists")
+    
+    # 3. Create Storage
     storage_path = f"/app/storage/{project.id}"
     if not os.path.exists(storage_path):
         os.makedirs(storage_path, exist_ok=True)
     
+    # 4. DB Insert
     new_proj = Project(id=project.id, name=project.name, storage_path=storage_path)
     db.add(new_proj)
     db.commit()
     
-    # Créateur = Owner
+    # 5. Assign Owner
     mem = ProjectMember(project_id=new_proj.id, user_id=user.id, project_role="owner")
     db.add(mem)
     db.commit()
-    return {"status": "created", "id": new_proj.id}
+    return {"status": "created", "id": new_proj.id, "role": user.global_role}
 
 @router.delete("/{project_id}")
 def delete_project(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    #
+    # Super Admin or Owner can delete
     is_admin = user.global_role == "super_admin"
     member = db.query(ProjectMember).filter(ProjectMember.project_id==project_id, ProjectMember.user_id==user.id).first()
     is_owner = member and member.project_role == "owner"
     
     if not (is_admin or is_owner): 
-        raise HTTPException(403, "Seul le propriétaire peut supprimer le projet")
+        raise HTTPException(403, "Only the Owner can delete this project")
         
     proj = db.query(Project).filter(Project.id == project_id).first()
     if proj:
@@ -71,41 +98,34 @@ def delete_project(project_id: str, user: User = Depends(get_current_user), db: 
         db.delete(proj)
         db.commit()
         return {"status": "deleted", "id": project_id}
-    raise HTTPException(404, "Projet non trouvé")
+    raise HTTPException(404, "Project not found")
 
 # --- MEMBERSHIP (DISCORD STYLE) ---
-
+# ... (Leaving existing membership routes as they were valid) ...
 @router.post("/{project_id}/members")
 def invite_or_update_member(project_id: str, invite: MemberInvite, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # [+] [INFO] Le Moderator peut inviter, mais seul l'Admin peut promouvoir
     checker = ProjectAccessChecker(required_role="moderator")
     checker(project_id, user, db)
 
-    # Vérification du grade de celui qui fait la requête
     current_mem = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == user.id).first()
     is_super_admin = user.global_role == "super_admin"
     
-    # [decision:logic] Un Moderator ne peut inviter que des viewers ou editors
     if not is_super_admin and current_mem.project_role == "moderator" and invite.role not in ["viewer", "editor"]:
-        raise HTTPException(403, "Un modérateur ne peut pas nommer de nouveaux Admins")
+        raise HTTPException(403, "Moderators cannot promote to Admin")
 
-    # Recherche cible
     target_user = None
     if invite.user_id:
         target_user = db.query(User).filter(User.firebase_uid == invite.user_id).first()
     elif invite.email:
         target_user = db.query(User).filter(User.email == invite.email).first()
     
-    if not target_user:
-        raise HTTPException(404, "Utilisateur introuvable")
+    if not target_user: raise HTTPException(404, "User not found")
 
     existing = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == target_user.id).first()
     
     if existing:
-        # [!] [CRITICAL] Seul l'Admin ou Owner peut changer un rôle existant
         if not is_super_admin and PROJECT_LEVELS.get(current_mem.project_role, 0) < PROJECT_LEVELS.get("admin"):
-            raise HTTPException(403, "Seul un Admin peut modifier les rôles existants")
-        
+            raise HTTPException(403, "Only Admin can change existing roles")
         existing.project_role = invite.role
         db.commit()
         return {"status": "updated", "uid": target_user.firebase_uid, "role": invite.role}
@@ -116,7 +136,6 @@ def invite_or_update_member(project_id: str, invite: MemberInvite, user: User = 
 
 @router.get("/{project_id}/members")
 def list_project_members(project_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    #
     checker = ProjectAccessChecker(required_role="viewer")
     checker(project_id, user, db)
     members = db.query(ProjectMember).filter(ProjectMember.project_id == project_id).all()
@@ -124,7 +143,6 @@ def list_project_members(project_id: str, user: User = Depends(get_current_user)
 
 @router.delete("/{project_id}/members/{target_uid}")
 def kick_member(project_id: str, target_uid: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Le Moderator peut kick
     checker = ProjectAccessChecker(required_role="moderator")
     checker(project_id, user, db)
 
@@ -132,15 +150,14 @@ def kick_member(project_id: str, target_uid: str, user: User = Depends(get_curre
     if not target_user: raise HTTPException(404, "User not found")
 
     membership = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == target_user.id).first()
-    if not membership: raise HTTPException(404, "Membre non trouvé")
+    if not membership: raise HTTPException(404, "Member not found")
     
-    # [!] [CRITICAL] Protection de l'Owner et hiérarchie du Kick
-    if membership.project_role == "owner": raise HTTPException(403, "Impossible d'expulser le propriétaire")
+    if membership.project_role == "owner": raise HTTPException(403, "Cannot kick the Owner")
     
     current_mem = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == user.id).first()
     if user.global_role != "super_admin":
         if PROJECT_LEVELS.get(current_mem.project_role) <= PROJECT_LEVELS.get(membership.project_role):
-            raise HTTPException(403, "Vous ne pouvez expulser que des membres de rang inférieur")
+            raise HTTPException(403, "You can only kick members with lower rank")
 
     db.delete(membership); db.commit()
     return {"status": "kicked", "uid": target_uid}

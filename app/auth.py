@@ -9,7 +9,7 @@ from datetime import datetime
 
 security = HTTPBearer(auto_error=False)
 
-# AI-REMARK: GLOBAL ROLES (Backend Level)
+# AI-REMARK: GLOBAL ROLES & HIERARCHY
 GLOBAL_LEVELS = {
     "super_admin": 100,
     "admin": 80,
@@ -19,7 +19,6 @@ GLOBAL_LEVELS = {
     "guest": 0
 }
 
-# AI-REMARK: PROJECT ROLES (Local Level)
 PROJECT_LEVELS = {
     "owner": 50,
     "admin": 40,
@@ -28,8 +27,20 @@ PROJECT_LEVELS = {
     "viewer": 10
 }
 
+# [+] [INFO] QUOTA CONFIGURATION
+# Defines limits for Projects (SQL creation) and Files (Physical storage per folder).
+# -1 indicates Unlimited.
+QUOTAS = {
+    "guest":       {"max_projects": 0,  "max_files": 10},
+    "user":        {"max_projects": 1,  "max_files": 100},
+    "nitro":       {"max_projects": 10, "max_files": 1000},
+    "moderator":   {"max_projects": -1, "max_files": -1},
+    "admin":       {"max_projects": -1, "max_files": -1},
+    "super_admin": {"max_projects": -1, "max_files": -1}
+}
+
 async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
-    # [+] [INFO] Hybrid Authentication (Header Bearer or ?token=)
+    # [+] [INFO] Hybrid Auth (Bearer or URL Token)
     token = creds.credentials if creds else request.query_params.get("token")
     
     if not token:
@@ -43,10 +54,8 @@ async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials
 
     user = db.query(User).filter(User.firebase_uid == uid).first()
     if not user:
-        # [decision:logic] Determine initial role based on email presence
-        # If no email, it is a Guest (Level 0). Otherwise, standard User (Level 20).
+        # [decision:logic] Initial role assignment (Email = User, No Email = Guest)
         initial_role = "user" if email else "guest"
-        
         user = User(
             firebase_uid=uid, 
             email=email, 
@@ -56,7 +65,7 @@ async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials
         )
         db.add(user); db.commit(); db.refresh(user)
 
-    # [!] [CRITICAL] Ban Check
+    # [!] [CRITICAL] Ban Enforcement
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account suspended. Contact support.")
 
