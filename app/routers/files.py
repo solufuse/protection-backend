@@ -6,6 +6,7 @@ import io
 import datetime
 from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..auth import get_current_user, ProjectAccessChecker
@@ -27,10 +28,8 @@ def get_target_path(user, project_id: Optional[str], db: Session, action: str = 
     # CAS 2 : SESSION / GUEST
     else:
         uid = user.firebase_uid
-        # On considère guest si l'email est manquant ou via logique spécifique
         is_guest = False 
         try:
-            # Petite logique pour détecter les invités Firebase si besoin
             if user.email is None or user.email == "": is_guest = True
         except: pass
         
@@ -50,33 +49,27 @@ async def upload_files(
     count = 0
 
     for file in files:
-        # Lecture du contenu en mémoire pour analyse
         content = await file.read()
         
-        # LOGIQUE DECOMPRESSION (Legacy Restore)
+        # LOGIQUE DECOMPRESSION
         if file.filename.endswith(".zip"):
             try:
-                # On essaie d'ouvrir le ZIP
                 with zipfile.ZipFile(io.BytesIO(content)) as z:
                     for name in z.namelist():
-                        # Sécurité : pas de fichiers système ou dossiers cachés Mac
                         if not name.endswith("/") and "__MACOSX" not in name and ".." not in name:
-                            # On extrait proprement
                             file_path = os.path.join(target_dir, os.path.basename(name))
                             with open(file_path, "wb") as f:
                                 f.write(z.read(name))
                             saved_files.append(name)
                             count += 1
             except Exception as e:
-                # Si le zip est corrompu, on le sauve comme un fichier normal
-                print(f"Zip Error: {e}, saving as regular file.")
+                print(f"Zip Error: {e}")
                 file_path = os.path.join(target_dir, file.filename)
                 with open(file_path, "wb") as f:
                     f.write(content)
                 saved_files.append(file.filename)
                 count += 1
         else:
-            # Fichier Normal
             file_path = os.path.join(target_dir, file.filename)
             with open(file_path, "wb") as f:
                 f.write(content)
@@ -108,31 +101,48 @@ def list_files(
         for f in os.listdir(target_dir):
             full_path = os.path.join(target_dir, f)
             if os.path.isfile(full_path) and not f.startswith('.'):
-                
-                # Récupération des métadonnées
                 stat = os.stat(full_path)
-                size = stat.st_size
-                mtime = stat.st_mtime
-                # Formatage Date : YYYY-MM-DD HH:MM:SS
-                dt_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+                dt_str = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
 
                 files_info.append({
                     "filename": f,
                     "path": f,
-                    "size": size,
-                    "uploaded_at": dt_str, # <--- C'est ce champ que le Frontend attend
-                    "content_type": "application/octet-stream" # Placeholder
+                    "size": stat.st_size,
+                    "uploaded_at": dt_str,
+                    "content_type": "application/octet-stream"
                 })
     except Exception as e:
         print(f"List Error: {e}")
         return {"files": [], "error": str(e)}
             
-    # Tri par date (plus récent en haut par défaut backend aussi)
     files_info.sort(key=lambda x: x['uploaded_at'], reverse=True)
-
     return {"files": files_info}
 
-# --- 3. DELETE ---
+# --- 3. DOWNLOAD (RESTORED!) ---
+@router.get("/download")
+def download_file(
+    filename: str = Query(...),
+    project_id: Optional[str] = Query(None),
+    # Note: On utilise Query param 'token' pour le lien direct navigateur, 
+    # ou Header Authorization pour les appels API.
+    # Ici, on simplifie en supposant que l'auth passe par Header comme le reste,
+    # mais pour un lien href, il faudra peut-être gérer le token en query param si le front le fait.
+    user = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    target_dir = get_target_path(user, project_id, db, action="read")
+    file_path = os.path.join(target_dir, filename)
+    
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found")
+        
+    return FileResponse(
+        path=file_path, 
+        filename=filename,
+        media_type='application/octet-stream'
+    )
+
+# --- 4. DELETE ---
 @router.delete("/file/{filename}")
 def delete_file(
     filename: str,
@@ -152,7 +162,7 @@ def delete_file(
     os.remove(file_path)
     return {"status": "deleted", "filename": filename}
 
-# --- 4. CLEAR ---
+# --- 5. CLEAR ---
 @router.delete("/clear")
 def clear_files(
     project_id: Optional[str] = Query(None),
