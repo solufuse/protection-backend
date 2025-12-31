@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import User, Project, ProjectMember
-from ..auth import get_current_user, ProjectAccessChecker, ROLE_LEVELS
+from ..auth import get_current_user, ProjectAccessChecker, GLOBAL_LEVELS, PROJECT_LEVELS
 from pydantic import BaseModel
 from typing import List, Optional
 
@@ -103,7 +103,7 @@ def invite_or_update_member(project_id: str, invite: MemberInvite, user: User = 
     
     if existing:
         # [!] [CRITICAL] Seul l'Admin ou Owner peut changer un rôle existant
-        if not is_super_admin and ROLE_LEVELS.get(current_mem.project_role, 0) < ROLE_LEVELS.get("admin"):
+        if not is_super_admin and PROJECT_LEVELS.get(current_mem.project_role, 0) < PROJECT_LEVELS.get("admin"):
             raise HTTPException(403, "Seul un Admin peut modifier les rôles existants")
         
         existing.project_role = invite.role
@@ -139,7 +139,7 @@ def kick_member(project_id: str, target_uid: str, user: User = Depends(get_curre
     
     current_mem = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == user.id).first()
     if user.global_role != "super_admin":
-        if ROLE_LEVELS.get(current_mem.project_role) <= ROLE_LEVELS.get(membership.project_role):
+        if PROJECT_LEVELS.get(current_mem.project_role) <= PROJECT_LEVELS.get(membership.project_role):
             raise HTTPException(403, "Vous ne pouvez expulser que des membres de rang inférieur")
 
     db.delete(membership); db.commit()
