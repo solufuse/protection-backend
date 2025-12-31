@@ -83,3 +83,13 @@ if extraction: app.include_router(extraction.router)
 
 @app.get("/")
 def read_root(): return {"status": "Online", "version": "2.6.1"}
+
+# [context:flow] : This endpoint is purely for infrastructure monitoring.
+# [+] [INFO] : Define the health check route to satisfy the load balancer.
+@app.get("/health")
+def health_check():
+    # [decision:logic] : Cloud providers (like DigitalOcean) ping this route to ensure the app is running.
+    # We must return a 200 OK status to prevent the platform from restarting the service.
+    
+    # [?] [THOUGHT] : Returning a simple JSON structure is standard practice here.
+    return {"status": "ok", "message": "Service is healthy"}
