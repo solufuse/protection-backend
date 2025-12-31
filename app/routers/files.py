@@ -20,11 +20,9 @@ STORAGE_ROOT = "/app/storage"
 # ==============================================================================
 
 def get_target_path(user: User, project_id: Optional[str], db: Session, action: str = "read") -> str:
-    """
-    [+] [INFO] Determines the physical storage path based on context.
-    - If project_id provided: Checks Project permissions (Viewer/Editor).
-    - If no project_id: Uses User/Guest personal session folder.
-    """
+    # [+] [INFO] Determines the physical storage path based on context.
+    # - If project_id provided: Checks Project permissions (Viewer/Editor).
+    # - If no project_id: Uses User/Guest personal session folder.
     
     # CASE A: PROJECT CONTEXT
     if project_id:
@@ -47,7 +45,7 @@ def get_target_path(user: User, project_id: Optional[str], db: Session, action: 
         return session_dir
 
 def count_files_in_dir(directory: str) -> int:
-    """Counts non-hidden files in a directory."""
+    # Counts non-hidden files in a directory.
     try:
         return len([f for f in os.listdir(directory) if os.path.isfile(os.path.join(directory, f)) and not f.startswith('.')])
     except:
@@ -64,9 +62,8 @@ async def upload_files(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Handles file uploads with Zip extraction and Quota enforcement.
-    """
+    # [+] [INFO] Handles file uploads with Zip extraction and Quota enforcement.
+
     # 1. Determine Target Path & Permissions
     target_dir = get_target_path(user, project_id, db, action="write")
     
@@ -97,14 +94,14 @@ async def upload_files(
                 try:
                     with zipfile.ZipFile(io.BytesIO(content)) as z:
                         for name in z.namelist():
-                            # Security: Prevent path traversal
+                            # Security: Prevent path traversal in zip (e.g. ../../etc/passwd)
                             if not name.endswith("/") and "__MACOSX" not in name and ".." not in name:
                                 extracted_path = os.path.join(target_dir, os.path.basename(name))
                                 with open(extracted_path, "wb") as f:
                                     f.write(z.read(name))
                                 saved_files.append(name)
                 except Exception as e:
-                    print(f"⚠️ [ZIP ERROR] Failed to unzip {file.filename}: {e}")
+                    print(f"Zip Error: {e}")
                     # Fallback: Save zip as-is if extraction fails
                     with open(file_path, "wb") as f:
                         f.write(content)
@@ -117,7 +114,7 @@ async def upload_files(
                 saved_files.append(file.filename)
                 
         except Exception as e:
-            print(f"❌ [UPLOAD ERROR] {e}")
+            print(f"Upload Error: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to save {file.filename}")
 
     return {
@@ -133,10 +130,8 @@ def list_files(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Lists files with metadata (Size, Date).
-    Used by Frontend to display the file explorer.
-    """
+    # [+] [INFO] Lists files with metadata (Size, Date).
+    
     target_dir = get_target_path(user, project_id, db, action="read")
     
     if not os.path.exists(target_dir):
@@ -172,10 +167,8 @@ def download_file(
     user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Secure file download.
-    Prevents Path Traversal attacks.
-    """
+    # [+] [INFO] Secure file download.
+    
     # Security: Sanitization
     if ".." in filename or "/" in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
@@ -199,9 +192,8 @@ def delete_file(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Delete a single file.
-    """
+    # [+] [INFO] Delete a single file.
+
     # Security: Sanitization
     if ".." in filename or "/" in filename:
         raise HTTPException(status_code=400, detail="Invalid filename")
@@ -224,10 +216,8 @@ def clear_files(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Wipes all files in the current folder.
-    Useful for 'Reset Session' buttons.
-    """
+    # [+] [INFO] Wipes all files in the current folder.
+    
     target_dir = get_target_path(user, project_id, db, action="write")
     
     deleted_count = 0
