@@ -22,7 +22,6 @@ app.add_middleware(
 )
 
 # Core Routes
-app.include_router(files.router, prefix="/session", tags=["Session (Legacy)"])
 app.include_router(files.router, prefix="/files", tags=["Files (Standard)"])
 app.include_router(admin.router, prefix="/admin", tags=["Global Admin"])
 app.include_router(storage_admin.router, prefix="/admin/storage", tags=["Storage"])
