@@ -1,6 +1,4 @@
-
 from app.schemas.protection import ProtectionPlan, GlobalSettings, ProjectConfig
-from app.services import session_manager
 from app.calculations import db_converter, topology_manager
 from app.calculations.ansi_code import common
 import pandas as pd
@@ -155,8 +153,7 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
         "comments": []
     }
 
-def run_batch_logic(config: ProjectConfig, token: str) -> List[dict]:
-    files = session_manager.get_files(token)
+def run_batch_logic(config: ProjectConfig, files: Dict[str, bytes]) -> List[dict]:
     global_tx_map = common.build_global_transformer_map(files)
     results = []
     
