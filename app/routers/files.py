@@ -1,6 +1,9 @@
 
 import os
 import shutil
+import zipfile
+import io
+import datetime
 from typing import List, Optional
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -10,35 +13,32 @@ from ..guest_guard import check_guest_restrictions
 
 router = APIRouter()
 
-# Helper pour déterminer le dossier cible (Session vs Projet)
+# --- HELPER: Target Path Logic ---
 def get_target_path(user, project_id: Optional[str], db: Session, action: str = "read"):
-    
-    # CAS 1 : C'est un PROJET
+    # CAS 1 : PROJET
     if project_id:
-        # Vérification des permissions (RBAC) via la DB
         checker = ProjectAccessChecker(required_role="viewer" if action == "read" else "editor")
         checker(project_id, user, db)
-        
-        # Le dossier est simplement l'ID du projet dans /app/storage
-        # (Assure-toi que projects.py crée bien les dossiers ici)
         project_dir = os.path.join("/app/storage", project_id)
         if not os.path.exists(project_dir):
             os.makedirs(project_dir, exist_ok=True)
         return project_dir
 
-    # CAS 2 : C'est la SESSION UTILISATEUR (Guest ou Perso)
+    # CAS 2 : SESSION / GUEST
     else:
-        # On utilise le Guest Guard existant pour gérer le dossier perso
-        # On suppose que l'utilisateur est un objet User (DB), on prend son firebase_uid
         uid = user.firebase_uid
-        # On détermine si c'est un guest via l'email (ou un champ is_guest si dispo)
-        is_guest = (user.email is None) 
+        # On considère guest si l'email est manquant ou via logique spécifique
+        is_guest = False 
+        try:
+            # Petite logique pour détecter les invités Firebase si besoin
+            if user.email is None or user.email == "": is_guest = True
+        except: pass
         
         return check_guest_restrictions(uid, is_guest, action="upload" if action == "write" else "read")
 
-# --- 1. UPLOAD (Dual Mode: Session / Project) ---
+# --- 1. UPLOAD (Smart Unzip) ---
 @router.post("/upload")
-def upload_files(
+async def upload_files(
     files: List[UploadFile] = File(...), 
     project_id: Optional[str] = Query(None),
     user = Depends(get_current_user),
@@ -47,16 +47,51 @@ def upload_files(
     target_dir = get_target_path(user, project_id, db, action="write")
     
     saved_files = []
-    for file in files:
-        file_path = os.path.join(target_dir, file.filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        saved_files.append(file.filename)
-        
-    return {"status": "success", "saved": saved_files, "context": "project" if project_id else "session"}
+    count = 0
 
-# --- 2. LIST (Dual Mode) ---
-@router.get("/details") # Pour compatibilité Frontend
+    for file in files:
+        # Lecture du contenu en mémoire pour analyse
+        content = await file.read()
+        
+        # LOGIQUE DECOMPRESSION (Legacy Restore)
+        if file.filename.endswith(".zip"):
+            try:
+                # On essaie d'ouvrir le ZIP
+                with zipfile.ZipFile(io.BytesIO(content)) as z:
+                    for name in z.namelist():
+                        # Sécurité : pas de fichiers système ou dossiers cachés Mac
+                        if not name.endswith("/") and "__MACOSX" not in name and ".." not in name:
+                            # On extrait proprement
+                            file_path = os.path.join(target_dir, os.path.basename(name))
+                            with open(file_path, "wb") as f:
+                                f.write(z.read(name))
+                            saved_files.append(name)
+                            count += 1
+            except Exception as e:
+                # Si le zip est corrompu, on le sauve comme un fichier normal
+                print(f"Zip Error: {e}, saving as regular file.")
+                file_path = os.path.join(target_dir, file.filename)
+                with open(file_path, "wb") as f:
+                    f.write(content)
+                saved_files.append(file.filename)
+                count += 1
+        else:
+            # Fichier Normal
+            file_path = os.path.join(target_dir, file.filename)
+            with open(file_path, "wb") as f:
+                f.write(content)
+            saved_files.append(file.filename)
+            count += 1
+        
+    return {
+        "status": "success", 
+        "saved": saved_files, 
+        "count": count,
+        "context": "project" if project_id else "session"
+    }
+
+# --- 2. LIST (With Date Metadata) ---
+@router.get("/details")
 @router.get("/list")
 def list_files(
     project_id: Optional[str] = Query(None),
@@ -69,19 +104,35 @@ def list_files(
         return {"files": []}
         
     files_info = []
-    for f in os.listdir(target_dir):
-        full_path = os.path.join(target_dir, f)
-        if os.path.isfile(full_path) and not f.startswith('.'):
-            files_info.append({
-                "filename": f,
-                "path": f, # Le frontend attend parfois 'path'
-                "size": os.path.getsize(full_path),
-                # "uploaded_at": ... (On pourrait ajouter la date ici)
-            })
+    try:
+        for f in os.listdir(target_dir):
+            full_path = os.path.join(target_dir, f)
+            if os.path.isfile(full_path) and not f.startswith('.'):
+                
+                # Récupération des métadonnées
+                stat = os.stat(full_path)
+                size = stat.st_size
+                mtime = stat.st_mtime
+                # Formatage Date : YYYY-MM-DD HH:MM:SS
+                dt_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+                files_info.append({
+                    "filename": f,
+                    "path": f,
+                    "size": size,
+                    "uploaded_at": dt_str, # <--- C'est ce champ que le Frontend attend
+                    "content_type": "application/octet-stream" # Placeholder
+                })
+    except Exception as e:
+        print(f"List Error: {e}")
+        return {"files": [], "error": str(e)}
             
+    # Tri par date (plus récent en haut par défaut backend aussi)
+    files_info.sort(key=lambda x: x['uploaded_at'], reverse=True)
+
     return {"files": files_info}
 
-# --- 3. DELETE (RESTORED!) ---
+# --- 3. DELETE ---
 @router.delete("/file/{filename}")
 def delete_file(
     filename: str,
@@ -92,7 +143,6 @@ def delete_file(
     target_dir = get_target_path(user, project_id, db, action="write")
     file_path = os.path.join(target_dir, filename)
     
-    # Sécurité basique anti ".."
     if ".." in filename or "/" in filename:
         raise HTTPException(400, "Invalid filename")
 
@@ -102,7 +152,7 @@ def delete_file(
     os.remove(file_path)
     return {"status": "deleted", "filename": filename}
 
-# --- 4. CLEAR (Optional) ---
+# --- 4. CLEAR ---
 @router.delete("/clear")
 def clear_files(
     project_id: Optional[str] = Query(None),
@@ -110,11 +160,8 @@ def clear_files(
     db: Session = Depends(get_db)
 ):
     target_dir = get_target_path(user, project_id, db, action="write")
-    
-    # On vide le dossier
     for f in os.listdir(target_dir):
         file_path = os.path.join(target_dir, f)
         if os.path.isfile(file_path):
             os.remove(file_path)
-            
     return {"status": "cleared"}
