@@ -3,58 +3,44 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from ..database import get_db
 from ..models import User
-from ..auth import get_current_user
+from ..auth import get_current_user, GLOBAL_LEVELS
 from pydantic import BaseModel
-from typing import List
 
 router = APIRouter()
 
-# AI-REMARK: DEFINITION DES ROLES GLOBAUX (GLOBAL_ROLE)
-# ------------------------------------------------------------------------------
-# 1. super_admin : Accès total au backend, stockage, DB et gestion des users.
-# 2. moderator   : Support technique. Peut auditer les projets mais pas supprimer.
-# 3. nitro       : [FUTURE FEATURE] Utilisateur Premium avec quotas étendus.
-# 4. user        : Utilisateur standard (limité à ses propres projets).
-# ------------------------------------------------------------------------------
-
 class RoleUpdate(BaseModel):
     email: str
-    role: str # super_admin, moderator, nitro, user
-
-def require_super_admin(user: User = Depends(get_current_user)):
-    """ [!] [CRITICAL] Verrou de sécurité pour les fonctions critiques. """
-    if not user or user.global_role != "super_admin":
-        raise HTTPException(status_code=403, detail="Droits Super Admin requis")
-    return user
+    role: str
 
 @router.get("/me")
 def get_my_profile(user: User = Depends(get_current_user)):
-    """
-    [+] [INFO] Retourne le profil et le rôle de l'utilisateur connecté.
-    [?] [THOUGHT] Permet au Frontend d'adapter l'affichage (ex: bouton Admin).
-    """
     return {
         "uid": user.firebase_uid,
         "email": user.email,
-        "global_role": user.global_role, # super_admin, moderator, nitro, user
+        "global_role": user.global_role,
         "projects": [p.project_id for p in user.project_memberships]
     }
 
-@router.get("/users", dependencies=[Depends(require_super_admin)])
-def list_all_users(db: Session = Depends(get_db)):
-    """ [+] [INFO] Liste exhaustive des utilisateurs pour l'administration. """
-    return db.query(User).all()
-
-@router.put("/users/role", dependencies=[Depends(require_super_admin)])
-def update_user_role(data: RoleUpdate, db: Session = Depends(get_db)):
+@router.put("/users/role")
+def update_user_role(data: RoleUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """
-    [+] [INFO] Promotion ou rétrogradation d'un utilisateur.
-    [ decision:logic] Seul le Super Admin peut utiliser cette route.
+    [+] [INFO] Gestion des rangs Nitro/User par les Modérateurs.
+    [decision:logic] Un Moderator peut mettre Nitro, mais seul Super-Admin peut mettre Admin.
     """
-    user = db.query(User).filter(User.email == data.email).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+    current_level = GLOBAL_LEVELS.get(user.global_role, 0)
     
-    user.global_role = data.role
+    # 1. Sécurité : Il faut au moins être Moderator (60)
+    if current_level < 60:
+        raise HTTPException(status_code=403, detail="Droit de modération requis")
+    
+    # 2. Un Moderator ne peut pas créer de rôles > Moderator
+    target_level = GLOBAL_LEVELS.get(data.role, 0)
+    if current_level < 100 and target_level >= current_level:
+        raise HTTPException(status_code=403, detail="Vous ne pouvez pas promouvoir à un rang supérieur au vôtre")
+
+    target_user = db.query(User).filter(User.email == data.email).first()
+    if not target_user: raise HTTPException(404, "Utilisateur non trouvé")
+    
+    target_user.global_role = data.role
     db.commit()
-    return {"status": "updated", "email": user.email, "new_role": user.global_role}
+    return {"status": "success", "new_role": target_user.global_role}
