@@ -10,6 +10,7 @@ from app.core.security import get_current_token
 from app.schemas.protection import ProjectConfig
 from app.calculations import db_converter, topology_manager
 from app.calculations.ansi_code import common as common_lib
+from app.calculations.file_utils import is_protection_file # [UPDATED IMPORT]
 
 from ..database import get_db
 from ..auth import get_current_user, ProjectAccessChecker
@@ -17,7 +18,6 @@ from ..guest_guard import check_guest_restrictions
 
 router = APIRouter(prefix="/common", tags=["Common Analysis"])
 
-# --- [HELPER] Path Resolution V2 ---
 def get_storage_path(user, project_id: Optional[str], db: Session) -> str:
     if project_id:
         checker = ProjectAccessChecker(required_role="viewer")
@@ -26,7 +26,6 @@ def get_storage_path(user, project_id: Optional[str], db: Session) -> str:
         if not os.path.exists(path): raise HTTPException(404, "Project folder missing")
         return path
     else:
-        # Guest Mode
         uid = user.firebase_uid
         is_guest = False
         try: 
@@ -48,18 +47,12 @@ def load_workspace_files(path: str) -> Dict[str, bytes]:
 
 def get_config_from_files(files: Dict[str, bytes]) -> ProjectConfig:
     tgt = files.get("config.json")
-    # Fallback search
     if not tgt:
         for n, c in files.items():
             if n.lower().endswith(".json"): tgt = c; break
     if not tgt: raise HTTPException(404, "No config.json found")
-    
-    try: 
-        return ProjectConfig(**json.loads(tgt))
-    except Exception as e: 
-        raise HTTPException(422, f"Invalid Config: {str(e)}")
-
-# --- ROUTES ---
+    try: return ProjectConfig(**json.loads(tgt))
+    except Exception as e: raise HTTPException(422, f"Invalid Config: {str(e)}")
 
 @router.post("/run")
 async def run(
@@ -68,21 +61,19 @@ async def run(
     user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # 1. Access Disk
     target_path = get_storage_path(user, project_id, db)
     files = load_workspace_files(target_path)
     
     if not files: raise HTTPException(400, "Workspace empty")
 
-    # 2. Config & Global Map
     config = get_config_from_files(files)
     global_tx = common_lib.build_global_transformer_map(files)
     
     results = []
     
-    # 3. Calculation Loop
     for fname, content in files.items():
-        if not common_lib.is_supported_protection(fname): continue
+        # [USE CENTRAL FILTER]
+        if not is_protection_file(fname): continue
         
         dfs = db_converter.extract_data_from_db(content)
         if not dfs: continue

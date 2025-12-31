@@ -12,6 +12,7 @@ from app.calculations import db_converter, topology_manager
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
 from app.routers import ansi_51 as ansi_51_router
 from app.routers import common as common_router
+from app.calculations.file_utils import is_protection_file # [UPDATED IMPORT]
 
 from ..database import get_db
 from ..auth import get_current_user, ProjectAccessChecker
@@ -41,8 +42,8 @@ def load_data_from_disk(path: str) -> Dict[str, pd.DataFrame]:
     if not os.path.exists(path): return {}
     
     for f in os.listdir(path):
-        # [FIX] Strict filter: Only .si2s and .mdb (No .lf1s)
-        if f.lower().endswith(('.si2s', '.mdb')):
+        # [USE CENTRAL FILTER]
+        if is_protection_file(f):
             full_path = os.path.join(path, f)
             try:
                 with open(full_path, "rb") as file_obj:

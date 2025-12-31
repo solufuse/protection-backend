@@ -2,7 +2,6 @@
 import os
 import json
 import io
-import pandas as pd
 from typing import Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -11,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.schemas.protection import ProjectConfig
 from app.calculations.ansi_code import ansi_51
 from app.calculations import db_converter, topology_manager
+from app.calculations.file_utils import is_protection_file  # [UPDATED IMPORT]
 
 from ..database import get_db
 from ..auth import get_current_user, ProjectAccessChecker
@@ -18,7 +18,6 @@ from ..guest_guard import check_guest_restrictions
 
 router = APIRouter(prefix="/ansi_51", tags=["ANSI 51"])
 
-# --- [HELPER] Path Resolution V2 ---
 def get_storage_path(user, project_id: Optional[str], db: Session) -> str:
     if project_id:
         checker = ProjectAccessChecker(required_role="viewer")
@@ -55,12 +54,11 @@ def get_config_from_files(files: Dict[str, bytes]) -> ProjectConfig:
     try: return ProjectConfig(**json.loads(tgt))
     except Exception as e: raise HTTPException(422, f"Invalid Config: {e}")
 
-# --- INTERNAL LOGIC ---
 def run_batch_internal(config: ProjectConfig, files: Dict[str, bytes]):
     results = []
     
-    # [FIX] Filter ONLY .si2s and .mdb (Exclude .lf1s)
-    net_files = {k: v for k, v in files.items() if k.lower().endswith(('.si2s', '.mdb'))}
+    # [USE CENTRAL FILTER]
+    net_files = {k: v for k, v in files.items() if is_protection_file(k)}
     
     for fname, content in net_files.items():
         dfs = db_converter.extract_data_from_db(content)
@@ -86,8 +84,6 @@ def run_batch_internal(config: ProjectConfig, files: Dict[str, bytes]):
                         "error": str(e)
                     })
     return results
-
-# --- ROUTES ---
 
 @router.post("/run")
 async def run_ansi_51_only(
