@@ -5,25 +5,49 @@ from .database import engine, Base
 from .routers import files, admin, projects, storage_admin, debug, users
 from sqlalchemy import text 
 
+# --- 1. AUTO-MIGRATION & DATA REPAIR ---
 def run_migrations():
+    """
+    [!] [CRITICAL] Database Repair Kit.
+    """
     try:
         with engine.connect() as connection:
+            # A. Standard Fields
             try: connection.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1"))
             except: pass 
             try: connection.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
             except: pass 
+            
+            # B. Ban Fields
             try: connection.execute(text("ALTER TABLE users ADD COLUMN ban_reason VARCHAR"))
             except: pass
             try: connection.execute(text("ALTER TABLE users ADD COLUMN admin_notes TEXT"))
             except: pass
+            
+            # C. [+] [INFO] NEW PROFILE FIELDS
+            try: connection.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR"))
+            except: pass
+            try: connection.execute(text("ALTER TABLE users ADD COLUMN first_name VARCHAR"))
+            except: pass
+            try: connection.execute(text("ALTER TABLE users ADD COLUMN last_name VARCHAR"))
+            except: pass
+            try: connection.execute(text("ALTER TABLE users ADD COLUMN bio VARCHAR"))
+            except: pass
+            try: connection.execute(text("ALTER TABLE users ADD COLUMN birth_date DATE"))
+            except: pass
+
+            # D. Data Cleanup
             try: connection.execute(text("UPDATE users SET is_active = 1 WHERE is_active IS NULL"))
             except: pass
+
             connection.commit()
+            print("✅ Database Schema Synced (Profile Fields Added)")
     except Exception as e:
         print(f"Migration Log: {e}")
 
 run_migrations()
 
+# --- 2. ROBUST IMPORTS ---
 try:
     from .routers import ingestion, loadflow, protection, inrush, extraction
 except ImportError:
@@ -31,7 +55,7 @@ except ImportError:
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Solufuse API", version="2.8.0")
+app = FastAPI(title="Solufuse API", version="2.9.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,7 +67,7 @@ app.add_middleware(
 
 app.include_router(files.router, prefix="/files", tags=["Files"])
 app.include_router(projects.router, prefix="/projects", tags=["Projects"])
-app.include_router(users.router, prefix="/users", tags=["Users (Public)"])
+app.include_router(users.router, prefix="/users", tags=["Users (Profile)"])
 app.include_router(admin.router, prefix="/admin", tags=["Global Admin"])
 app.include_router(storage_admin.router, prefix="/admin/storage", tags=["Storage"])
 app.include_router(debug.router, prefix="/debug", tags=["Debug"])
@@ -55,7 +79,7 @@ if inrush: app.include_router(inrush.router)
 if extraction: app.include_router(extraction.router)
 
 @app.get("/")
-def read_root(): return {"status": "Online", "version": "2.8.0"}
+def read_root(): return {"status": "Online", "version": "2.9.0"}
 
 @app.get("/health")
 def health_check(): return {"status": "ok"}
