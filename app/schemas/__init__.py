@@ -6,5 +6,6 @@ from .user_mgmt import (
     UserAdminView, 
     BanRequest, 
     RoleUpdate, 
+    UserUpdate,
     ValidRole
 )

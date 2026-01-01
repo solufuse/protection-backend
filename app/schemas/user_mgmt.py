@@ -11,11 +11,11 @@ class ProjectSummary(BaseModel):
     id: str
     role: str
     class Config:
-        orm_mode = True
+        from_attributes = True # [Fix] Updated for Pydantic V2 (was orm_mode)
 
 # --- USER SCHEMAS ---
 
-# 1. Update Request (What the user sends to change profile)
+# 1. Update Request (The Missing Class)
 class UserUpdate(BaseModel):
     username: Optional[str] = None
     first_name: Optional[str] = None
@@ -23,19 +23,19 @@ class UserUpdate(BaseModel):
     birth_date: Optional[date] = None
     bio: Optional[str] = None
 
-# 2. Public View (What others see in Forum/Directory)
+# 2. Public View
 class UserPublic(BaseModel):
     uid: str
-    username: Optional[str]      # Show Pseudo if available
-    email_masked: Optional[str]  # Fallback if no pseudo
+    username: Optional[str]
+    email_masked: Optional[str]
     global_role: str
     bio: Optional[str]
     is_active: bool
     created_at: Optional[datetime]
     class Config:
-        orm_mode = True
+        from_attributes = True # [Fix] V2
 
-# 3. Me View (Private Profile)
+# 3. Me View
 class UserProfile(UserPublic):
     email: Optional[str]
     first_name: Optional[str]
@@ -43,7 +43,7 @@ class UserProfile(UserPublic):
     birth_date: Optional[date]
     projects: List[ProjectSummary] = []
 
-# 4. Admin View (Full Details)
+# 4. Admin View
 class UserAdminView(UserPublic):
     email: Optional[str]
     first_name: Optional[str]
