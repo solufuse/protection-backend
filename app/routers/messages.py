@@ -34,19 +34,20 @@ class MessageView(BaseModel):
 COOLDOWN_SECONDS = {
     "user": 5,      
     "nitro": 1,     
-    "moderator": 0, 
+    "moderator": 0, # Staff needs to be able to react instantly
     "admin": 0,
     "super_admin": 0
 }
 
 # 2. Character Limits (Length of message)
+# [decision:logic] Staff gets more space for Announcements/Rules/Support.
 CHAR_LIMITS = {
-    "guest": 0,      # Cannot post anyway
-    "user": 200,     # Standard limit
-    "nitro": 500,    # Paid perk
-    "moderator": 2000,
-    "admin": 4000,
-    "super_admin": 5000
+    "guest": 0,      
+    "user": 200,     # Standard chat
+    "nitro": 500,    # Premium chat
+    "moderator": 2000, # Needed for moderation explanations
+    "admin": 2000,     # Needed for announcements
+    "super_admin": 4000 # Emergency system logs or huge announcements
 }
 
 # --- ROUTES ---
@@ -59,9 +60,6 @@ def list_messages(
     user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Read messages safely.
-    """
     # Access Control
     if not project_id.startswith("PUBLIC_"):
         if GLOBAL_LEVELS.get(user.global_role, 0) < 60: 
@@ -94,16 +92,6 @@ def post_message(
     user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Post message with strict validation.
-    [security]
-    1. Check Guest (Ban)
-    2. Check Membership (Access)
-    3. Check Rate Limit (Spam)
-    4. Check Char Limit (Length)
-    5. Sanitize HTML (XSS Protection)
-    """
-    
     user_role = user.global_role
     user_level = GLOBAL_LEVELS.get(user_role, 0)
 
@@ -128,17 +116,17 @@ def post_message(
             if diff < delay:
                 raise HTTPException(429, f"Slow down! Wait {int(delay - diff)}s.")
 
-    # 4. [+] [SECURITY] CHARACTER LIMIT CHECK
-    max_chars = CHAR_LIMITS.get(user_role, 200) # Default to 200 if role unknown
+    # 4. CHARACTER LIMIT CHECK
+    # Fallback to 200 if role is unknown
+    max_chars = CHAR_LIMITS.get(user_role, 200) 
+    
     if len(msg.content) > max_chars:
         raise HTTPException(400, f"Message too long. Your limit is {max_chars} characters.")
 
     if len(msg.content.strip()) == 0:
         raise HTTPException(400, "Message cannot be empty.")
 
-    # 5. [+] [SECURITY] XSS SANITIZATION
-    # Converts <script> to &lt;script&gt; so it displays as text but doesn't run.
-    # SQLAlchemy (db.add) automatically handles SQL Injection protection.
+    # 5. XSS SANITIZATION
     safe_content = html.escape(msg.content)
 
     # 6. SAVE
