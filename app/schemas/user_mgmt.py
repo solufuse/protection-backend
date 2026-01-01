@@ -43,7 +43,6 @@ class BanRequest(BaseModel):
     reason: Optional[str] = None
     notes: Optional[str] = None
 
-
 class RoleUpdate(BaseModel):
     email: Optional[str] = None
     user_id: Optional[str] = None
