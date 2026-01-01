@@ -1,5 +1,6 @@
 
-from fastapi import Depends, HTTPException, Request
+import os
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from .database import get_db
@@ -7,6 +8,10 @@ from .models import User, ProjectMember
 from firebase_admin import auth as firebase_auth
 from datetime import datetime
 
+# [decision:logic] Fetch ADMIN_UID from environment variables.
+ADMIN_UID = os.getenv("ADMIN_UID")
+
+# [info] Hybrid Auth: Auto-error False allows us to check query params manually if Header is missing
 security = HTTPBearer(auto_error=False)
 
 # AI-REMARK: GLOBAL ROLES & HIERARCHY
@@ -27,16 +32,14 @@ PROJECT_LEVELS = {
     "viewer": 10
 }
 
-# [+] [INFO] QUOTA CONFIGURATION
-# Defines limits for Projects (SQL creation) and Files (Physical storage per folder).
-# -1 indicates Unlimited.
+# [+] [INFO] QUOTA CONFIGURATION (Updated with max_mb)
 QUOTAS = {
-    "guest":       {"max_projects": 0,  "max_files": 10},
-    "user":        {"max_projects": 1,  "max_files": 100},
-    "nitro":       {"max_projects": 10, "max_files": 1000},
-    "moderator":   {"max_projects": -1, "max_files": -1},
-    "admin":       {"max_projects": -1, "max_files": -1},
-    "super_admin": {"max_projects": -1, "max_files": -1}
+    "guest":       {"max_projects": 0,  "max_files": 10,   "max_mb": 5},
+    "user":        {"max_projects": 1,  "max_files": 100,  "max_mb": 10},
+    "nitro":       {"max_projects": 10, "max_files": 1000, "max_mb": 100},
+    "moderator":   {"max_projects": -1, "max_files": -1,   "max_mb": -1},
+    "admin":       {"max_projects": -1, "max_files": -1,   "max_mb": -1},
+    "super_admin": {"max_projects": -1, "max_files": -1,   "max_mb": -1}
 }
 
 async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials = Depends(security), db: Session = Depends(get_db)):
@@ -53,9 +56,15 @@ async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials
         raise HTTPException(status_code=401, detail="Session expired or invalid")
 
     user = db.query(User).filter(User.firebase_uid == uid).first()
+    
     if not user:
-        # [decision:logic] Initial role assignment (Email = User, No Email = Guest)
+        # [decision:logic] Initial role logic
         initial_role = "user" if email else "guest"
+        
+        # [!] [CRITICAL] AUTO-ADMIN CHECK (First Login)
+        if ADMIN_UID and uid == ADMIN_UID:
+            initial_role = "super_admin"
+
         user = User(
             firebase_uid=uid, 
             email=email, 
@@ -65,9 +74,14 @@ async def get_current_user(request: Request, creds: HTTPAuthorizationCredentials
         )
         db.add(user); db.commit(); db.refresh(user)
 
+    # [!] [CRITICAL] Security Override (Even if user exists)
+    if ADMIN_UID and uid == ADMIN_UID and user.global_role != "super_admin":
+        user.global_role = "super_admin"
+        db.commit()
+
     # [!] [CRITICAL] Ban Enforcement
     if not user.is_active:
-        raise HTTPException(status_code=403, detail="Account suspended. Contact support.")
+        raise HTTPException(status_code=403, detail=f"Account suspended: {user.ban_reason}")
 
     return user
 
