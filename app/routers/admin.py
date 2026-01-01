@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 
 from ..database import get_db
 from ..models import User
-# [!] [CRITICAL] Import via the package (thanks to __init__.py fix)
 from ..schemas import UserAdminView, BanRequest, ValidRole, RoleUpdate
 from ..auth import get_current_user, GLOBAL_LEVELS
 
@@ -46,10 +45,9 @@ def list_admin_users(
         
     users = query.offset(skip).limit(limit).all()
     
-    # Mapping logic is handled by Pydantic 'orm_mode = True' in schemas
-    # But we explicitly build the list to ensure all fields are passed
     results = []
     for u in users:
+        # [!] [FIX] Added missing profile fields to satisfy UserAdminView schema
         results.append(UserAdminView(
             uid=u.firebase_uid,
             email=u.email,
@@ -58,29 +56,31 @@ def list_admin_users(
             is_active=u.is_active,
             created_at=u.created_at,
             ban_reason=u.ban_reason,
-            admin_notes=u.admin_notes
+            admin_notes=u.admin_notes,
+            # [+] New fields
+            username=u.username,
+            first_name=u.first_name,
+            last_name=u.last_name,
+            bio=u.bio
         ))
     return results
 
-# --- 2. UPDATE ROLE (The Missing Function) ---
+# --- 2. UPDATE ROLE ---
 @router.put("/users/role", summary="Promote/Demote User")
 def update_user_role(
     data: RoleUpdate, 
     user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    # Hierarchy Check
     current_level = GLOBAL_LEVELS.get(user.global_role, 0)
     target_role_level = GLOBAL_LEVELS.get(data.role, 0)
 
-    if current_level < 60: # Moderator Min
+    if current_level < 60: 
         raise HTTPException(403, "Moderator access required")
     
-    # Cannot promote someone above yourself
     if current_level < 100 and target_role_level >= current_level:
         raise HTTPException(403, "Cannot assign a rank equal or higher than your own")
 
-    # Find Target
     target_user = None
     if data.user_id:
         target_user = db.query(User).filter(User.firebase_uid == data.user_id).first()
@@ -90,7 +90,6 @@ def update_user_role(
     if not target_user:
         raise HTTPException(404, "User not found")
 
-    # Cannot modify a superior
     target_current_level = GLOBAL_LEVELS.get(target_user.global_role, 0)
     if current_level < 100 and target_current_level >= current_level:
          raise HTTPException(403, "Cannot modify a superior")
@@ -122,7 +121,7 @@ def ban_user(data: BanRequest, user: User = Depends(require_admin), db: Session 
     db.commit()
     return {"status": "success", "is_active": target_user.is_active}
 
-# --- 4. CLEANUP (Firebase + Disk + DB) ---
+# --- 4. CLEANUP ---
 @router.delete("/guests/cleanup", summary="Total Guest Purge")
 def cleanup_guests(
     hours_old: int = 24, 
@@ -135,20 +134,16 @@ def cleanup_guests(
     
     for guest in expired:
         uid = guest.firebase_uid
-        # 1. Firebase
         try: auth.delete_user(uid)
         except Exception as e: report["errors"].append(f"Auth {uid}: {e}")
         
-        # 2. Storage
         try:
             if os.path.exists(STORAGE_ROOT):
                 for f in os.listdir(STORAGE_ROOT):
-                    # Matches folder starting with UID (e.g. UID_ProjectID)
                     if f.startswith(uid): 
                         shutil.rmtree(os.path.join(STORAGE_ROOT, f))
         except Exception as e: report["errors"].append(f"Storage {uid}: {e}")
         
-        # 3. DB
         try: db.delete(guest)
         except Exception as e: report["errors"].append(f"DB {uid}: {e}")
         
