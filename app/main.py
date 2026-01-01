@@ -7,9 +7,6 @@ from sqlalchemy import text
 
 # --- 1. AUTO-MIGRATION & DATA REPAIR ---
 def run_migrations():
-    """
-    [!] [CRITICAL] Database Repair Kit.
-    """
     try:
         with engine.connect() as connection:
             # A. Users Table Migrations
@@ -34,16 +31,20 @@ def run_migrations():
             try: connection.execute(text("ALTER TABLE users ADD COLUMN birth_date DATE"))
             except: pass
 
-            # B. [+] [FIX] Project Table Migrations (The Missing Link)
+            # B. Project Migrations
             try: connection.execute(text("ALTER TABLE projects ADD COLUMN owner_id VARCHAR"))
             except: pass
 
-            # C. Data Cleanup
+            # C. [+] [FIX] Messages Table Creation (Manually via SQL if needed, but Base.metadata handles creation usually)
+            # SQLAlchemy Base.metadata.create_all handles NEW tables.
+            # ALTER is only for columns on EXISTING tables.
+            
+            # D. Data Cleanup
             try: connection.execute(text("UPDATE users SET is_active = 1 WHERE is_active IS NULL"))
             except: pass
 
             connection.commit()
-            print("✅ Database Schema Synced (Project owner_id added)")
+            print("✅ Database Schema Synced")
     except Exception as e:
         print(f"Migration Log: {e}")
 
@@ -55,9 +56,10 @@ try:
 except ImportError:
     ingestion = loadflow = protection = inrush = extraction = None
 
+# [!] [CRITICAL] This line actually creates the 'messages' table if it doesn't exist
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Solufuse API", version="2.9.1")
+app = FastAPI(title="Solufuse API", version="2.9.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -81,7 +83,7 @@ if inrush: app.include_router(inrush.router)
 if extraction: app.include_router(extraction.router)
 
 @app.get("/")
-def read_root(): return {"status": "Online", "version": "2.9.1"}
+def read_root(): return {"status": "Online", "version": "2.9.2"}
 
 @app.get("/health")
 def health_check(): return {"status": "ok"}
