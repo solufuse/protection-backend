@@ -1,40 +1,45 @@
 
+# [structure:root]
+# ADMIN ROUTER - User Management & System Cleanup
+# Handles Roles, Bans, and the critical Guest Cleanup Logic.
+
+import os
+import shutil
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
+from firebase_admin import auth 
+from typing import List, Optional, Literal
+from pydantic import BaseModel
+from datetime import datetime, timedelta
+
 from ..database import get_db
 from ..models import User
 from ..auth import get_current_user, GLOBAL_LEVELS
-from pydantic import BaseModel
-from typing import List, Optional, Literal
-from datetime import datetime, timedelta
 
 router = APIRouter()
 
-# [?] [THOUGHT] Use Literal to enforce dropdown menus in Swagger UI.
-# This strictly limits the values that can be sent to the API.
+# [decision:logic] Centralized Storage Root definition
+STORAGE_ROOT = "/app/storage"
+
+# [?] [THOUGHT] Rigid typing for Swagger UI Dropdowns
 ValidRole = Literal["super_admin", "admin", "moderator", "nitro", "user", "guest"]
 
-# AI-REMARK: SCHEMAS
+# --- SCHEMAS ---
 class RoleUpdate(BaseModel):
-    # One of the two (email or user_id) must be provided.
     email: Optional[str] = None
     user_id: Optional[str] = None
-    
-    # [!] [CRITICAL] Strict Pydantic validation.
-    # Swagger will display a Dropdown Menu instead of a text field.
     role: ValidRole
 
 class BanRequest(BaseModel):
     user_id: str
-    is_active: bool  # False = Banned, True = Active
-    reason: Optional[str] = "Violation of Terms of Service"
+    is_active: bool  # False = Banned
+    reason: Optional[str] = "Terms of Service Violation"
+
+# --- ROUTES ---
 
 @router.get("/me", summary="Get My Profile")
 def get_my_profile(user: User = Depends(get_current_user)):
-    """
-    [+] [INFO] Frontend entry point.
-    Returns vital info: UID, Email, Global Role, and Project List.
-    """
+    # [+] [INFO] Essential for Frontend Auth State
     return {
         "uid": user.firebase_uid,
         "email": user.email,
@@ -43,57 +48,33 @@ def get_my_profile(user: User = Depends(get_current_user)):
         "projects_count": len(user.project_memberships)
     }
 
-@router.get("/users", summary="List Users (Paginated & Filtered)")
+@router.get("/users", summary="List Users (Admin Filter)")
 def list_all_users(
-    # [?] [THOUGHT] Pagination avoids crashing the browser with thousands of users.
     skip: int = 0,
     limit: int = 50,
-    role: Optional[ValidRole] = Query(None, description="Filter by exact role (e.g., 'nitro')"),
-    email_search: Optional[str] = Query(None, description="Partial email search (e.g., 'gmail')"),
-    only_guests: bool = Query(False, description="If True, ignores other filters and shows only Guests (email=null)"),
+    role: Optional[ValidRole] = Query(None),
+    email_search: Optional[str] = Query(None),
+    only_guests: bool = Query(False),
     user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Administrator Search Engine.
-    
-    **Permissions:**
-    - Requires at least **ADMIN (Level 80)**.
-    
-    **Filters:**
-    1. **role**: Shows only users with this specific role.
-    2. **email_search**: Checks if string is contained in email (case-insensitive).
-    3. **only_guests**: Exclusive filter for anonymous users (no email).
-    """
-    
-    # [!] [CRITICAL] Security Check (Min: Admin)
+    # [!] [CRITICAL] Minimum Admin Level Required (80)
     if GLOBAL_LEVELS.get(user.global_role, 0) < 80:
-        raise HTTPException(status_code=403, detail="Access reserved for Administrators (Level 80+)")
+        raise HTTPException(403, "Admin access required")
     
     query = db.query(User)
     
-    # [decision:logic] Priority to 'Guests' filter as it is exclusive
     if only_guests:
         query = query.filter(User.email == None)
-    
-    # Filter 1: Specific Role (Validated by Swagger)
     if role:
         query = query.filter(User.global_role == role)
-    
-    # Filter 2: Email Search (SQL LIKE)
     if email_search:
         query = query.filter(User.email.ilike(f"%{email_search}%"))
         
-    # [+] [INFO] Applying Pagination
     total_count = query.count()
     users = query.offset(skip).limit(limit).all()
     
-    return {
-        "total": total_count,
-        "skip": skip,
-        "limit": limit,
-        "data": users
-    }
+    return {"total": total_count, "data": users}
 
 @router.put("/users/role", summary="Update User Role")
 def update_user_role(
@@ -101,28 +82,19 @@ def update_user_role(
     user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Secure Privilege Update.
+    # [decision:logic] Hierarchical Protection
+    # A moderator cannot promote someone to admin (above themselves).
     
-    **Security Rules (Anti-Abuse):**
-    1. You must be at least **Moderator**.
-    2. You cannot promote someone to a rank **higher or equal** to yours.
-    3. You cannot demote someone with a rank **higher or equal** to yours.
-    """
-    
-    # 1. Retrieve Hierarchy Levels (Integer)
     current_level = GLOBAL_LEVELS.get(user.global_role, 0)
     target_role_level = GLOBAL_LEVELS.get(data.role, 0)
 
-    # [!] [CRITICAL] Safeguard 1: Entry Level
-    if current_level < 60: # Minimum Moderator
-        raise HTTPException(status_code=403, detail="Moderation rights required (Level 60+)")
+    if current_level < 60: # Moderator Min
+        raise HTTPException(403, "Moderator access required")
     
-    # [!] [CRITICAL] Safeguard 2: Hierarchy Protection
     if current_level < 100 and target_role_level >= current_level:
-        raise HTTPException(status_code=403, detail=f"Forbidden: You (Lvl {current_level}) cannot assign rank {data.role} (Lvl {target_role_level})")
+        raise HTTPException(403, "Cannot assign a rank equal or higher than your own")
 
-    # 2. Find Target
+    # Find Target
     target_user = None
     if data.user_id:
         target_user = db.query(User).filter(User.firebase_uid == data.user_id).first()
@@ -130,85 +102,112 @@ def update_user_role(
         target_user = db.query(User).filter(User.email == data.email).first()
     
     if not target_user:
-        raise HTTPException(status_code=404, detail="Target user not found")
+        raise HTTPException(404, "User not found")
 
-    # [?] [THOUGHT] Optional Check: Do not touch superiors
+    # Protection: Do not touch superiors
     target_current_level = GLOBAL_LEVELS.get(target_user.global_role, 0)
     if current_level < 100 and target_current_level >= current_level:
-         raise HTTPException(status_code=403, detail="Forbidden: You cannot modify a superior.")
+         raise HTTPException(403, "Cannot modify a superior")
 
-    # 3. Apply Change
-    previous_role = target_user.global_role
     target_user.global_role = data.role
     db.commit()
     
-    return {
-        "status": "success", 
-        "user_email": target_user.email or "Guest (No Email)", 
-        "user_uid": target_user.firebase_uid,
-        "change": f"{previous_role} -> {target_user.global_role}"
-    }
-
-# --- NEW FEATURES ---
+    return {"status": "success", "new_role": target_user.global_role}
 
 @router.put("/users/ban", summary="Ban/Unban User")
 def ban_user(data: BanRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """
-    [!] [CRITICAL] Activates or Deactivates user access.
-    Does not delete data, only prevents login.
-    """
-    # Only Admin (80+) can ban
     if GLOBAL_LEVELS.get(user.global_role, 0) < 80:
-        raise HTTPException(status_code=403, detail="Ban rights required (Admin)")
+        raise HTTPException(403, "Admin access required")
 
     target_user = db.query(User).filter(User.firebase_uid == data.user_id).first()
     if not target_user:
         raise HTTPException(404, "User not found")
         
-    # Protection: Cannot ban a superior
     target_level = GLOBAL_LEVELS.get(target_user.global_role, 0)
     current_level = GLOBAL_LEVELS.get(user.global_role, 0)
     
     if target_level >= current_level and user.global_role != "super_admin":
-        raise HTTPException(403, "Impossible to ban a hierarchical superior")
+        raise HTTPException(403, "Cannot ban a superior")
 
     target_user.is_active = data.is_active
     db.commit()
-    
-    status_msg = "Active" if data.is_active else "Banned"
-    return {"status": "success", "user_uid": target_user.firebase_uid, "account_state": status_msg}
+    return {"status": "success", "is_active": target_user.is_active}
 
-@router.delete("/guests/cleanup", summary="Cleanup Guests")
+# --- CLEANUP LOGIC ---
+
+@router.delete("/guests/cleanup", summary="Total Guest Purge (Firebase+Disk+DB)")
 def cleanup_guests(
     hours_old: int = 24, 
     user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
     """
-    [decision:logic] Permanently deletes users without email (Guests)
-    created more than X hours ago. Keeps the DB clean.
+    [!] [CRITICAL] SYSTEM MAINTENANCE
+    1. Identifies Guests (no email) older than X hours.
+    2. Deletes them from Firebase Auth (prevents ghost accounts).
+    3. Wipes their data from /app/storage (frees up disk space).
+    4. Removes them from SQL Database.
     """
     if user.global_role != "super_admin":
-        raise HTTPException(status_code=403, detail="Super Admin required for cleanup")
+        raise HTTPException(403, "Super Admin required")
 
     cutoff_time = datetime.utcnow() - timedelta(hours=hours_old)
     
-    # Find expired guests
     expired_guests = db.query(User).filter(
         User.email == None,
         User.created_at < cutoff_time
     ).all()
     
-    count = len(expired_guests)
-    
-    # Delete
-    for guest in expired_guests:
-        db.delete(guest)
-    
-    db.commit()
-    
-    return {
-        "status": "cleaned", 
-        "deleted_count": count, 
-        "criteria": f"Guests older than {hours_old} hours"
+    report = {
+        "found": len(expired_guests),
+        "firebase_deleted": 0,
+        "storage_cleaned": 0,
+        "db_deleted": 0,
+        "errors": []
     }
+    
+    # [?] [THOUGHT] Pre-fetch directory listing to avoid repeated OS calls
+    try:
+        if os.path.exists(STORAGE_ROOT):
+            all_folders = os.listdir(STORAGE_ROOT)
+        else:
+            all_folders = []
+    except:
+        all_folders = []
+
+    for guest in expired_guests:
+        uid = guest.firebase_uid
+        
+        # 1. Firebase Delete
+        try:
+            auth.delete_user(uid)
+            report["firebase_deleted"] += 1
+        except Exception as e:
+            # AI-REMARK: User might already be deleted in Firebase, log but continue.
+            report["errors"].append(f"Firebase {uid}: {str(e)}")
+
+        # 2. Storage Delete
+        # We look for any folder starting with the UID (e.g., UID_ProjectID)
+        cleaned_folders = 0
+        for folder_name in all_folders:
+            if folder_name.startswith(uid):
+                full_path = os.path.join(STORAGE_ROOT, folder_name)
+                try:
+                    if os.path.exists(full_path):
+                        shutil.rmtree(full_path)
+                        cleaned_folders += 1
+                except Exception as e:
+                    report["errors"].append(f"Storage {folder_name}: {str(e)}")
+        
+        if cleaned_folders > 0:
+            report["storage_cleaned"] += 1
+
+        # 3. DB Delete
+        try:
+            db.delete(guest)
+            report["db_deleted"] += 1
+        except Exception as e:
+            report["errors"].append(f"DB {uid}: {str(e)}")
+
+    db.commit()
+    return report
