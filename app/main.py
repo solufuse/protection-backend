@@ -12,19 +12,17 @@ def run_migrations():
     """
     try:
         with engine.connect() as connection:
-            # A. Standard Fields
+            # A. Users Table Migrations
             try: connection.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1"))
             except: pass 
             try: connection.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
             except: pass 
-            
-            # B. Ban Fields
             try: connection.execute(text("ALTER TABLE users ADD COLUMN ban_reason VARCHAR"))
             except: pass
             try: connection.execute(text("ALTER TABLE users ADD COLUMN admin_notes TEXT"))
             except: pass
             
-            # C. [+] [INFO] NEW PROFILE FIELDS
+            # Profile Fields
             try: connection.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR"))
             except: pass
             try: connection.execute(text("ALTER TABLE users ADD COLUMN first_name VARCHAR"))
@@ -36,12 +34,16 @@ def run_migrations():
             try: connection.execute(text("ALTER TABLE users ADD COLUMN birth_date DATE"))
             except: pass
 
-            # D. Data Cleanup
+            # B. [+] [FIX] Project Table Migrations (The Missing Link)
+            try: connection.execute(text("ALTER TABLE projects ADD COLUMN owner_id VARCHAR"))
+            except: pass
+
+            # C. Data Cleanup
             try: connection.execute(text("UPDATE users SET is_active = 1 WHERE is_active IS NULL"))
             except: pass
 
             connection.commit()
-            print("✅ Database Schema Synced (Profile Fields Added)")
+            print("✅ Database Schema Synced (Project owner_id added)")
     except Exception as e:
         print(f"Migration Log: {e}")
 
@@ -55,7 +57,7 @@ except ImportError:
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Solufuse API", version="2.9.0")
+app = FastAPI(title="Solufuse API", version="2.9.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -79,7 +81,7 @@ if inrush: app.include_router(inrush.router)
 if extraction: app.include_router(extraction.router)
 
 @app.get("/")
-def read_root(): return {"status": "Online", "version": "2.9.0"}
+def read_root(): return {"status": "Online", "version": "2.9.1"}
 
 @app.get("/health")
 def health_check(): return {"status": "ok"}
