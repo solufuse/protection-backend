@@ -2,14 +2,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
-from .routers import files, admin, projects, storage_admin, debug, users
+# [!] [INFO] Add messages router import
+from .routers import files, admin, projects, storage_admin, debug, users, messages
 from sqlalchemy import text 
 
-# --- 1. AUTO-MIGRATION & DATA REPAIR ---
+# --- AUTO-MIGRATION ---
 def run_migrations():
     try:
         with engine.connect() as connection:
-            # A. Users Table Migrations
+            # Columns Checks (Users)
             try: connection.execute(text("ALTER TABLE users ADD COLUMN is_active BOOLEAN DEFAULT 1"))
             except: pass 
             try: connection.execute(text("ALTER TABLE users ADD COLUMN created_at DATETIME"))
@@ -18,8 +19,7 @@ def run_migrations():
             except: pass
             try: connection.execute(text("ALTER TABLE users ADD COLUMN admin_notes TEXT"))
             except: pass
-            
-            # Profile Fields
+            # Profile
             try: connection.execute(text("ALTER TABLE users ADD COLUMN username VARCHAR"))
             except: pass
             try: connection.execute(text("ALTER TABLE users ADD COLUMN first_name VARCHAR"))
@@ -30,19 +30,12 @@ def run_migrations():
             except: pass
             try: connection.execute(text("ALTER TABLE users ADD COLUMN birth_date DATE"))
             except: pass
-
-            # B. Project Migrations
+            # Projects
             try: connection.execute(text("ALTER TABLE projects ADD COLUMN owner_id VARCHAR"))
             except: pass
-
-            # C. [+] [FIX] Messages Table Creation (Manually via SQL if needed, but Base.metadata handles creation usually)
-            # SQLAlchemy Base.metadata.create_all handles NEW tables.
-            # ALTER is only for columns on EXISTING tables.
-            
-            # D. Data Cleanup
+            # Cleanup
             try: connection.execute(text("UPDATE users SET is_active = 1 WHERE is_active IS NULL"))
             except: pass
-
             connection.commit()
             print("✅ Database Schema Synced")
     except Exception as e:
@@ -50,16 +43,15 @@ def run_migrations():
 
 run_migrations()
 
-# --- 2. ROBUST IMPORTS ---
+# --- IMPORTS ---
 try:
     from .routers import ingestion, loadflow, protection, inrush, extraction
 except ImportError:
     ingestion = loadflow = protection = inrush = extraction = None
 
-# [!] [CRITICAL] This line actually creates the 'messages' table if it doesn't exist
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="Solufuse API", version="2.9.2")
+app = FastAPI(title="Solufuse API", version="2.9.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,6 +64,8 @@ app.add_middleware(
 app.include_router(files.router, prefix="/files", tags=["Files"])
 app.include_router(projects.router, prefix="/projects", tags=["Projects"])
 app.include_router(users.router, prefix="/users", tags=["Users (Profile)"])
+# [+] [INFO] New Forum Router
+app.include_router(messages.router, prefix="/messages", tags=["Forum Messages"])
 app.include_router(admin.router, prefix="/admin", tags=["Global Admin"])
 app.include_router(storage_admin.router, prefix="/admin/storage", tags=["Storage"])
 app.include_router(debug.router, prefix="/debug", tags=["Debug"])
@@ -83,7 +77,7 @@ if inrush: app.include_router(inrush.router)
 if extraction: app.include_router(extraction.router)
 
 @app.get("/")
-def read_root(): return {"status": "Online", "version": "2.9.2"}
+def read_root(): return {"status": "Online", "version": "2.9.3"}
 
 @app.get("/health")
 def health_check(): return {"status": "ok"}
