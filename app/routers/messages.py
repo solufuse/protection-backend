@@ -1,4 +1,5 @@
 
+import html
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
@@ -22,18 +23,30 @@ class MessageView(BaseModel):
     created_at: datetime
     author_uid: str
     author_username: Optional[str] = None
-    author_role: str # To show colors in UI (Admin/Nitro)
+    author_role: str 
     
     class Config:
         from_attributes = True
 
-# --- SETTINGS ---
+# --- SETTINGS (LIMITS) ---
+
+# 1. Anti-Spam (Time between messages)
 COOLDOWN_SECONDS = {
-    "user": 5,      # Anti-spam standard
-    "nitro": 1,     # Fast chat
-    "moderator": 0, # No limit
+    "user": 5,      
+    "nitro": 1,     
+    "moderator": 0, 
     "admin": 0,
     "super_admin": 0
+}
+
+# 2. Character Limits (Length of message)
+CHAR_LIMITS = {
+    "guest": 0,      # Cannot post anyway
+    "user": 200,     # Standard limit
+    "nitro": 500,    # Paid perk
+    "moderator": 2000,
+    "admin": 4000,
+    "super_admin": 5000
 }
 
 # --- ROUTES ---
@@ -47,21 +60,16 @@ def list_messages(
     db: Session = Depends(get_db)
 ):
     """
-    [+] [INFO] Read messages.
-    [decision:logic]
-    - PUBLIC_ projects: Readable by everyone (even Guests).
-    - Private projects: Readable only by members.
+    [+] [INFO] Read messages safely.
     """
-    # 1. Access Control
+    # Access Control
     if not project_id.startswith("PUBLIC_"):
-        # Strict check for private projects
-        if GLOBAL_LEVELS.get(user.global_role, 0) < 60: # Staff bypass
+        if GLOBAL_LEVELS.get(user.global_role, 0) < 60: 
             mem = db.query(ProjectMember).filter(ProjectMember.project_id == project_id, ProjectMember.user_id == user.id).first()
             if not mem:
                 raise HTTPException(403, "You do not have access to this private channel.")
 
-    # 2. Fetch Messages (Newest first usually for chat apps, but API often sends oldest first or pagination)
-    # Let's return newest first for easy UI handling
+    # Fetch
     msgs = db.query(Message).filter(Message.project_id == project_id)\
         .order_by(desc(Message.created_at))\
         .offset(skip).limit(limit).all()
@@ -87,16 +95,21 @@ def post_message(
     db: Session = Depends(get_db)
 ):
     """
-    [+] [INFO] Post a message.
-    [!] [CRITICAL] 
-    - Guests blocked.
-    - Rate Limit applied based on Role.
+    [+] [INFO] Post message with strict validation.
+    [security]
+    1. Check Guest (Ban)
+    2. Check Membership (Access)
+    3. Check Rate Limit (Spam)
+    4. Check Char Limit (Length)
+    5. Sanitize HTML (XSS Protection)
     """
     
+    user_role = user.global_role
+    user_level = GLOBAL_LEVELS.get(user_role, 0)
+
     # 1. GUEST BLOCK
-    user_level = GLOBAL_LEVELS.get(user.global_role, 0)
-    if user_level < 20: # 20 is 'user'
-        raise HTTPException(403, "Guests cannot post messages. Please register.")
+    if user_level < 20: 
+        raise HTTPException(403, "Guests cannot post messages.")
 
     # 2. MEMBERSHIP CHECK
     if not project_id.startswith("PUBLIC_"):
@@ -105,25 +118,32 @@ def post_message(
             if not mem:
                 raise HTTPException(403, "You are not a member of this private channel.")
     
-    # 3. ANTI-SPAM (Rate Limit)
-    delay = COOLDOWN_SECONDS.get(user.global_role, 5) # Default 5s
+    # 3. ANTI-SPAM (Time)
+    delay = COOLDOWN_SECONDS.get(user_role, 5)
     if delay > 0:
         last_msg = db.query(Message).filter(Message.user_id == user.id)\
             .order_by(desc(Message.created_at)).first()
-        
         if last_msg:
-            # Calculate time passed
-            # Note: created_at is naive or timezone aware depending on config. Assuming UTC.
-            now = datetime.utcnow()
-            # Safety for TZ issues: if last_msg is 'future' (clock drift), we block just in case or ignore
-            diff = (now - last_msg.created_at).total_seconds()
-            
+            diff = (datetime.utcnow() - last_msg.created_at).total_seconds()
             if diff < delay:
-                raise HTTPException(429, f"Slow down! Wait {int(delay - diff)}s before posting.")
+                raise HTTPException(429, f"Slow down! Wait {int(delay - diff)}s.")
 
-    # 4. SAVE
+    # 4. [+] [SECURITY] CHARACTER LIMIT CHECK
+    max_chars = CHAR_LIMITS.get(user_role, 200) # Default to 200 if role unknown
+    if len(msg.content) > max_chars:
+        raise HTTPException(400, f"Message too long. Your limit is {max_chars} characters.")
+
+    if len(msg.content.strip()) == 0:
+        raise HTTPException(400, "Message cannot be empty.")
+
+    # 5. [+] [SECURITY] XSS SANITIZATION
+    # Converts <script> to &lt;script&gt; so it displays as text but doesn't run.
+    # SQLAlchemy (db.add) automatically handles SQL Injection protection.
+    safe_content = html.escape(msg.content)
+
+    # 6. SAVE
     new_msg = Message(
-        content=msg.content,
+        content=safe_content,
         user_id=user.id,
         project_id=project_id,
         created_at=datetime.utcnow()
@@ -140,10 +160,6 @@ def delete_message(
     user: User = Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """
-    [+] [INFO] Delete message.
-    Logic: You can delete your OWN message, or be a Moderator+.
-    """
     msg = db.query(Message).filter(Message.id == message_id).first()
     if not msg: raise HTTPException(404, "Message not found")
     
