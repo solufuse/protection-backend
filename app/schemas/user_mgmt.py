@@ -42,3 +42,9 @@ class BanRequest(BaseModel):
     is_active: bool
     reason: Optional[str] = None
     notes: Optional[str] = None
+
+
+class RoleUpdate(BaseModel):
+    email: Optional[str] = None
+    user_id: Optional[str] = None
+    role: ValidRole
