@@ -4,7 +4,7 @@ import io
 import json
 import zipfile
 import pandas as pd
-from typing import Optional
+from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse, Response
 from sqlalchemy.orm import Session
@@ -76,6 +76,8 @@ def download_single(format: str, filename: str = Query(...), project_id: Optiona
 
 @router.get("/download-all/{format}")
 def download_all_zip(format: str, project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
+    # This legacy endpoint downloads EVERYTHING in the folder.
+    # We keep it for backward compatibility if needed.
     base_dir = get_ingestion_path(user, project_id, db)
     if not os.path.exists(base_dir): raise HTTPException(404, "Storage not found")
     zip_buffer = io.BytesIO()
@@ -98,3 +100,52 @@ def download_all_zip(format: str, project_id: Optional[str] = Query(None), user 
     if count == 0: raise HTTPException(400, "No convertible files found")
     zip_buffer.seek(0)
     return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=batch_export.zip"})
+
+# [!] NEW: Bulk Convert & Download (Selective)
+@router.post("/bulk-download/{format}")
+def bulk_convert_download(
+    format: str,
+    filenames: List[str], 
+    project_id: Optional[str] = Query(None), 
+    user = Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    base_dir = get_ingestion_path(user, project_id, db)
+    if not os.path.exists(base_dir): raise HTTPException(404, "Storage not found")
+    
+    zip_buffer = io.BytesIO()
+    count = 0
+    
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
+        for fname in filenames:
+            # Security check
+            if ".." in fname or "/" in fname: continue
+            
+            # Check compatibility
+            if not is_db_file(fname): continue
+            
+            full_path = os.path.join(base_dir, fname)
+            if os.path.isfile(full_path):
+                try:
+                    with open(full_path, "rb") as file_obj: content = file_obj.read()
+                    dfs = db_converter.extract_data_from_db(content)
+                    if dfs:
+                        base = os.path.splitext(fname)[0]
+                        if format == "xlsx": 
+                            excel_bytes = db_converter.generate_excel_bytes(dfs).getvalue()
+                            z.writestr(f"{base}.xlsx", excel_bytes)
+                        elif format == "json":
+                            d = {t: df.where(pd.notnull(df), None).to_dict(orient="records") for t, df in dfs.items()}
+                            z.writestr(f"{base}.json", json.dumps(d, default=str, indent=2))
+                        count += 1
+                except Exception as e:
+                    print(f"Error converting {fname}: {e}")
+                    continue
+
+    if count == 0: 
+        # Fallback: if no files converted, maybe user selected 0 files or invalid ones
+        raise HTTPException(400, "No convertible files selected or conversion failed.")
+        
+    zip_buffer.seek(0)
+    filename_zip = f"solufuse_converted_{format}.zip"
+    return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": f"attachment; filename={filename_zip}"})
