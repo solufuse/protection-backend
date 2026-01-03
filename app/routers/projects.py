@@ -11,15 +11,16 @@ from sqlalchemy import or_
 from ..database import get_db
 from ..models import User, Project, ProjectMember
 from ..auth import get_current_user, ProjectAccessChecker, GLOBAL_LEVELS, PROJECT_LEVELS, QUOTAS
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional
 
 router = APIRouter()
 
 # --- SCHEMAS ---
 class ProjectCreate(BaseModel):
-    id: str
-    name: str
+    # [decision:logic] Limit ID to 20 chars and restrict special chars to avoid URL issues
+    id: str = Field(..., min_length=3, max_length=20, pattern="^[a-zA-Z0-9_-]+$")
+    name: str = Field(..., min_length=1, max_length=20)
 
 class MemberInvite(BaseModel):
     email: Optional[str] = None

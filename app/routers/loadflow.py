@@ -1,6 +1,7 @@
 
 import os
 import json
+import datetime
 from typing import Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
@@ -73,14 +74,48 @@ async def run(format: str = "json", project_id: Optional[str] = Query(None), use
 
 @router.post("/run-and-save")
 async def run_save(basename: str = "lf_res", project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
+    """
+    Run loadflow analysis and archive the result in a 'loadflow_results' subfolder.
+    Includes validation for filename length and timestamp generation.
+    """
+    # 1. Validation (Max 20 chars)
+    if len(basename) > 20:
+        raise HTTPException(400, "Basename too long (max 20 characters).")
+    
+    # 2. Basic cleaning to prevent path injection
+    safe_basename = "".join([c for c in basename if c.isalnum() or c in ('-', '_')])
+    if not safe_basename: safe_basename = "result"
+    
+    # 3. Get Base Directory (Project or Session)
     target_dir = get_analysis_path(user, project_id, db, action="write")
+    
+    # 4. Load Files & Calculate
     files_map = load_directory_content(target_dir)
     if not files_map: raise HTTPException(400, "Workspace is empty")
-    settings = extract_settings(files_map)
-    try: results = loadflow_calculator.analyze_loadflow(files_map, settings, only_winners=False)
-    except Exception as e: raise HTTPException(500, f"Calculation Error: {str(e)}")
     
-    output_path = os.path.join(target_dir, f"{basename}.json")
+    settings = extract_settings(files_map)
+    try: 
+        results = loadflow_calculator.analyze_loadflow(files_map, settings, only_winners=False)
+    except Exception as e: 
+        raise HTTPException(500, f"Calculation Error: {str(e)}")
+    
+    # 5. Archive Logic: Create folder and generate Timestamped filename
+    # [structure:storage] Isolate results in 'loadflow_results' to keep root clean
+    archive_dir = os.path.join(target_dir, "loadflow_results")
+    if not os.path.exists(archive_dir):
+        os.makedirs(archive_dir, exist_ok=True)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{safe_basename}_{timestamp}.json"
+    output_path = os.path.join(archive_dir, filename)
+    
+    # 6. Save File
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(jsonable_encoder(results), f, indent=2, default=str)
-    return {"status": "saved", "files": [f"{basename}.json"]}
+        
+    return {
+        "status": "saved", 
+        "folder": "loadflow_results",
+        "filename": filename,
+        "full_path": f"/loadflow_results/{filename}"
+    }
