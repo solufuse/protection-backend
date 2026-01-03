@@ -76,8 +76,6 @@ def download_single(format: str, filename: str = Query(...), project_id: Optiona
 
 @router.get("/download-all/{format}")
 def download_all_zip(format: str, project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
-    # This legacy endpoint downloads EVERYTHING in the folder.
-    # We keep it for backward compatibility if needed.
     base_dir = get_ingestion_path(user, project_id, db)
     if not os.path.exists(base_dir): raise HTTPException(404, "Storage not found")
     zip_buffer = io.BytesIO()
@@ -101,7 +99,7 @@ def download_all_zip(format: str, project_id: Optional[str] = Query(None), user 
     zip_buffer.seek(0)
     return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=batch_export.zip"})
 
-# [!] NEW: Bulk Convert & Download (Selective)
+# [!] NEW ENDPOINT: Selective Bulk Conversion
 @router.post("/bulk-download/{format}")
 def bulk_convert_download(
     format: str,
@@ -118,10 +116,7 @@ def bulk_convert_download(
     
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
         for fname in filenames:
-            # Security check
             if ".." in fname or "/" in fname: continue
-            
-            # Check compatibility
             if not is_db_file(fname): continue
             
             full_path = os.path.join(base_dir, fname)
@@ -143,7 +138,6 @@ def bulk_convert_download(
                     continue
 
     if count == 0: 
-        # Fallback: if no files converted, maybe user selected 0 files or invalid ones
         raise HTTPException(400, "No convertible files selected or conversion failed.")
         
     zip_buffer.seek(0)
