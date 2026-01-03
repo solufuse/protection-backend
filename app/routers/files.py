@@ -79,7 +79,6 @@ async def upload_files(files: List[UploadFile] = File(...), project_id: Optional
         
     return {"status": "success", "saved": saved_files, "count": count}
 
-# [!] CLEANUP: details ONLY
 @router.get("/details")
 def list_files(project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
     target_dir = get_target_path(user, project_id, db, action="read")
@@ -100,7 +99,6 @@ def list_files(project_id: Optional[str] = Query(None), user = Depends(get_curre
     files_info.sort(key=lambda x: x['uploaded_at'], reverse=True)
     return {"files": files_info}
 
-# [!] NEW: Bulk ZIP Download
 @router.post("/bulk-download")
 def bulk_download(
     filenames: List[str], 
@@ -109,7 +107,6 @@ def bulk_download(
     db: Session = Depends(get_db)
 ):
     target_dir = get_target_path(user, project_id, db, action="read")
-    
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for fname in filenames:
@@ -117,7 +114,6 @@ def bulk_download(
             fpath = os.path.join(target_dir, fname)
             if os.path.exists(fpath):
                 zip_file.write(fpath, arcname=fname)
-    
     zip_buffer.seek(0)
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     return StreamingResponse(
@@ -125,6 +121,44 @@ def bulk_download(
         media_type="application/zip", 
         headers={"Content-Disposition": f"attachment; filename=solufuse_bulk_{timestamp}.zip"}
     )
+
+# [!] NEW: Bulk Delete Endpoint (One request to delete many)
+@router.post("/bulk-delete")
+def bulk_delete(
+    filenames: List[str],
+    project_id: Optional[str] = Query(None),
+    user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    target_dir = get_target_path(user, project_id, db, action="write")
+    deleted = []
+    errors = []
+    
+    # Check permissions once
+    is_super_admin = (user.global_role == "super_admin")
+
+    for fname in filenames:
+        if ".." in fname or "/" in fname: 
+            errors.append(f"{fname}: Invalid path")
+            continue
+            
+        # Protection logic applied to bulk items
+        if not is_super_admin:
+             if fname.endswith(".db") or fname.endswith(".sqlite") or fname == "protection.db":
+                 errors.append(f"{fname}: Protected system file")
+                 continue
+
+        fpath = os.path.join(target_dir, fname)
+        if os.path.exists(fpath):
+            try:
+                os.remove(fpath)
+                deleted.append(fname)
+            except Exception as e:
+                errors.append(f"{fname}: Error")
+        else:
+            errors.append(f"{fname}: Not found")
+            
+    return {"status": "completed", "deleted": deleted, "errors": errors}
 
 @router.get("/download")
 def download_file(filename: str = Query(...), project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -137,11 +171,9 @@ def download_file(filename: str = Query(...), project_id: Optional[str] = Query(
 @router.delete("/file/{filename}")
 def delete_file(filename: str, project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
     if ".." in filename or "/" in filename: raise HTTPException(400, "Invalid filename")
-    
     if user.global_role != "super_admin":
         if filename.endswith(".db") or filename.endswith(".sqlite") or filename == "protection.db":
             raise HTTPException(403, "Protected system file. Only Super Admin can delete.")
-
     target_dir = get_target_path(user, project_id, db, action="write")
     file_path = os.path.join(target_dir, filename)
     if not os.path.exists(file_path): raise HTTPException(404, "File not found")
@@ -151,12 +183,10 @@ def delete_file(filename: str, project_id: Optional[str] = Query(None), user = D
 @router.delete("/clear")
 def clear_files(project_id: Optional[str] = Query(None), user = Depends(get_current_user), db: Session = Depends(get_db)):
     target_dir = get_target_path(user, project_id, db, action="write")
-    
     if user.global_role != "super_admin":
         for f in os.listdir(target_dir):
             if f.endswith(".db") or f == "protection.db":
                  raise HTTPException(403, "Folder contains protected database. Cannot clear.")
-
     for f in os.listdir(target_dir):
         fp = os.path.join(target_dir, f)
         if os.path.isfile(fp): os.remove(fp)
