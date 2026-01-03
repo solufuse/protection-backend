@@ -47,17 +47,15 @@ def list_admin_users(
     
     results = []
     for u in users:
-        # [!] [FIX] Added missing profile fields to satisfy UserAdminView schema
         results.append(UserAdminView(
             uid=u.firebase_uid,
             email=u.email,
-            email_masked=u.email, # Admin sees full email
+            email_masked=u.email,
             global_role=u.global_role,
             is_active=u.is_active,
             created_at=u.created_at,
             ban_reason=u.ban_reason,
             admin_notes=u.admin_notes,
-            # [+] New fields
             username=u.username,
             first_name=u.first_name,
             last_name=u.last_name,
@@ -121,8 +119,8 @@ def ban_user(data: BanRequest, user: User = Depends(require_admin), db: Session 
     db.commit()
     return {"status": "success", "is_active": target_user.is_active}
 
-# --- 4. CLEANUP ---
-@router.delete("/guests/cleanup", summary="Total Guest Purge")
+# --- 4. CLEANUP (Standard) ---
+@router.delete("/guests/cleanup", summary="Local Guest Purge (DB Based)")
 def cleanup_guests(
     hours_old: int = 24, 
     user: User = Depends(require_super_admin), 
@@ -149,3 +147,69 @@ def cleanup_guests(
         
     db.commit()
     return report
+
+# --- 5. DEEP CLEANUP (Direct Firebase Scan) ---
+# [!] NEW ROUTE: Scans Firebase directly to kill orphans
+@router.delete("/firebase/cleanup", summary="Deep Clean Firebase Anonymous Users")
+def deep_clean_firebase(
+    confirm: bool = Query(False, description="Set to true to execute deletion"),
+    user: User = Depends(require_super_admin),
+    db: Session = Depends(get_db)
+):
+    if not confirm:
+        # Just Count
+        page = auth.list_users()
+        count = 0
+        while page:
+            for u in page.users:
+                if len(u.provider_data) == 0: count += 1
+            page = page.get_next_page()
+        return {"status": "preview", "anonymous_users_found": count, "message": "Set confirm=true to delete."}
+
+    # Execute
+    page = auth.list_users()
+    uids_to_delete = []
+    
+    while page:
+        for u in page.users:
+            if len(u.provider_data) == 0:
+                uids_to_delete.append(u.uid)
+        page = page.get_next_page()
+    
+    if not uids_to_delete:
+        return {"status": "success", "deleted": 0, "message": "No anonymous users found."}
+
+    # Batch Delete (Max 1000 per call)
+    batch_size = 1000
+    total_deleted = 0
+    errors = []
+    
+    for i in range(0, len(uids_to_delete), batch_size):
+        batch = uids_to_delete[i:i+batch_size]
+        try:
+            result = auth.delete_users(batch)
+            total_deleted += result.success_count
+            errors.extend([str(e) for e in result.errors])
+        except Exception as e:
+            errors.append(str(e))
+
+    # Optional: Sync Local DB & Storage (Best Effort)
+    # Remove from local DB if they exist
+    db.query(User).filter(User.firebase_uid.in_(uids_to_delete)).delete(synchronize_session=False)
+    db.commit()
+    
+    # Remove Storage Folders
+    cleaned_storage = 0
+    if os.path.exists(STORAGE_ROOT):
+        for uid in uids_to_delete:
+            user_dir = os.path.join(STORAGE_ROOT, uid)
+            if os.path.exists(user_dir):
+                try: shutil.rmtree(user_dir); cleaned_storage += 1
+                except: pass
+
+    return {
+        "status": "success",
+        "firebase_deleted": total_deleted,
+        "storage_cleaned": cleaned_storage,
+        "errors": errors
+    }
