@@ -17,15 +17,36 @@ class Std51Settings(BaseModel):
     time_dial_I3: TimeDialConfig = TimeDialConfig(value=0.1, curve="DT")
     time_dial_I4: TimeDialConfig = TimeDialConfig(value=0.05, curve="DT")
 
+class Std21Settings(BaseModel):
+    base_current_amp: float = 436.2
+    ct_primary_amp: float = 500.0
+    l_span_meters: float = 8.0
+    zone1_overreach_pct: float = 400.0
+    zone1_delay_s: float = 0.6
+    zone1_logic: str = "Trip 3-Phase (Backup Mode)"
+    zone_q_reach_ohm: float = 5.004
+    zone_q_delay_s: float = 0.09
+    zone_q_logic_desc: str = "Send Blocking Signal (Blocking Scheme)"
+    zone_4_reach_ohm: float = 5.008
+    zone_4_delay_s: float = 0.8
+    zone_4_logic_desc: str = "Backup Trip (Ultimate Backup)"
+    factor_phase_max: float = 0.6
+    factor_ground_max: float = 0.8
+    r1ph_typical_ohm: float = 10.0
+    psb_percentage: float = 45.0
+
 # New container for typed settings
 class Ansi51Category(BaseModel):
     transformer: Std51Settings = Std51Settings()
     incomer: Std51Settings = Std51Settings(factor_I1=1.0) # Default sensible for Incomer
     coupling: Std51Settings = Std51Settings(factor_I1=1.0) # Default sensible for Coupling
 
+class Ansi21Category(BaseModel):
+    incomer: Std21Settings = Std21Settings()
+
 class GlobalSettings(BaseModel):
-    # Replaced single 'std_51' with categorised 'ansi_51'
     ansi_51: Ansi51Category = Ansi51Category()
+    ansi_21: Ansi21Category = Ansi21Category()
 
 class TransformerConfig(BaseModel):
     name: str
