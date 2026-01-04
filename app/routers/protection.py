@@ -12,6 +12,7 @@ from app.calculations import db_converter, topology_manager
 from app.calculations.ansi_code import AVAILABLE_ANSI_MODULES
 from app.calculations.ansi_code import common as common_lib
 from app.routers import ansi_51 as ansi_51_router
+from app.routers import ansi_21 as ansi_21_router
 from app.routers import common as common_router
 from app.calculations.file_utils import is_protection_file
 
@@ -21,6 +22,7 @@ from ..guest_guard import check_guest_restrictions
 
 router = APIRouter(prefix="/protection", tags=["Protection Coordination (PC)"])
 router.include_router(ansi_51_router.router)
+router.include_router(ansi_21_router.router)
 router.include_router(common_router.router)
 
 def resolve_protection_path(user, project_id: Optional[str], db: Session) -> str:
