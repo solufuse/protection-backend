@@ -1,3 +1,4 @@
+
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
 
@@ -20,7 +21,7 @@ class Std51Settings(BaseModel):
 class Std21Settings(BaseModel):
     base_current_amp: float = 436.2
     ct_primary_amp: float = 500.0
-    l_span_meters: float = 8.0
+    l_span_meters: float = 8.0 # The specific setting for ANSI 21 arc resistance calculation
     zone1_overreach_pct: float = 400.0
     zone1_delay_s: float = 0.6
     zone1_logic: str = "Trip 3-Phase (Backup Mode)"
@@ -37,7 +38,6 @@ class Std21Settings(BaseModel):
     # Fallback values moved from ansi_21.py
     fallback_ik2min_sec_ref_amps: float = 4800.0
     fallback_kvnom_busfrom: float = 225.0
-    fallback_length_link_km: str = "0.008 km"
 
 # New container for typed settings
 class Ansi51Category(BaseModel):
@@ -67,7 +67,7 @@ class LinkData(BaseModel):
 class ProtectionPlan(BaseModel):
     id: str
     type: str
-    bus_from: Optional[str] = None 
+    bus_from: Optional[str] = None
     bus_to: Optional[str] = None
     ct_primary: str = "CT 100/1 A"
     related_source: Optional[str] = None
@@ -77,7 +77,7 @@ class ProtectionPlan(BaseModel):
     meta_data: Optional[Dict[str, Any]] = None
 
     class Config:
-        extra = "allow" 
+        extra = "allow"
 
 class ProjectConfig(BaseModel):
     settings: GlobalSettings = GlobalSettings()

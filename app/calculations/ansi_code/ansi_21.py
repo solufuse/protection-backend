@@ -48,8 +48,8 @@ class MiCOM_Safety_Engine:
 
         NOMINAL_VOLTAGE_KV = self.common_data.get("kVnom_busfrom", self.settings.fallback_kvnom_busfrom)
         
-        length_str = self.common_data.get("Lenght_link", self.settings.fallback_length_link_km).replace("km", "").strip()
-        L_SPAN_METERS = float(length_str) * 1000
+        # Use the specific setting from Std21Settings, not from common_data
+        L_SPAN_METERS = self.settings.l_span_meters
         
         CT_PRIMARY_AMP = self.settings.ct_primary_amp
 
@@ -86,10 +86,11 @@ class MiCOM_Safety_Engine:
 
         # 3. Arc Resistance
         target_current = I_SC_USER_HYPOTHESIS
-        r_arc = (28710 * L_SPAN_METERS) / (target_current ** 1.4) if target_current > 0 else 0
+        r_arc_numerator = 28710 * L_SPAN_METERS
+        r_arc = r_arc_numerator / (target_current ** 1.4) if target_current > 0 else 0
         proof_arc_formula = "R_arc = (28710 * L) / (I_sc ^ 1.4)"
         proof_arc_subst = f"(28710 * {L_SPAN_METERS}) / ({target_current:.0f}^1.4)"
-        proof_arc_res = f"229680 / {target_current ** 1.4:.0f} = {r_arc:.2f} Ohm" if target_current > 0 else "N/A"
+        proof_arc_res = f"{r_arc_numerator:.0f} / {target_current ** 1.4:.0f} = {r_arc:.2f} Ohm" if target_current > 0 else "N/A"
 
         # 4. Load Blinder
         v_min_kv = NOMINAL_VOLTAGE_KV * 0.8
@@ -158,7 +159,7 @@ class MiCOM_Safety_Engine:
                         "Z_Load_Min": round(z_load_ct, 2), "Limit_RPh_Max": round(r_ph_max_limit, 2)
                     },
                     "BLOCKING_OSCILLATIONS": {
-                        "Basis_R1Ph": R1PH_TYPICAL_OHM, "Settings_Delta": delta_psb, "Demonstration": proof_psb
+                        "Basis_RPh": R1PH_TYPICAL_OHM, "Settings_Delta": delta_psb, "Demonstration": proof_psb
                     }
                 }
             }
