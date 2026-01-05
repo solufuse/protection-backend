@@ -2,6 +2,7 @@
 import numpy as np
 import cmath
 import json
+import re
 from app.schemas.protection import ProtectionPlan, ProjectConfig, Std21Settings
 from app.calculations.ansi_code import common
 
@@ -24,8 +25,11 @@ class MiCOM_Safety_Engine:
         if not complex_str or not isinstance(complex_str, str):
             return 0j
         try:
-            # Format: "R + jX"
-            return complex(complex_str.replace(" ", ""))
+            # Format: "R + jX" -> "R + Xj"
+            # Remove spaces and move 'j' from prefix to suffix for the imaginary part.
+            s = complex_str.replace(" ", "")
+            s = re.sub(r'j([0-9.]+)', r'\1j', s)
+            return complex(s)
         except (ValueError, TypeError):
             return 0j
 
@@ -51,6 +55,7 @@ class MiCOM_Safety_Engine:
         # Use the specific setting from Std21Settings, not from common_data
         L_SPAN_METERS = self.settings.l_span_meters
         
+        # This value is now correctly overridden from the plan
         CT_PRIMARY_AMP = self.settings.ct_primary_amp
 
         # [context:flow] 2. STRATEGY INPUTS (from settings)
@@ -97,7 +102,7 @@ class MiCOM_Safety_Engine:
         v_ph_min_volts = v_min_kv * 1000 / np.sqrt(3)
         z_load_ct = v_ph_min_volts / (1.2 * CT_PRIMARY_AMP) if CT_PRIMARY_AMP > 0 else 0
         proof_load_subst = f"({v_min_kv:.1f}kV * 1000 / sqrt(3)) / (1.2 * {CT_PRIMARY_AMP}A)"
-        proof_load_res = f"{v_ph_min_volts:.0f} / {1.2 * CT_PRIMARY_AMP} = {round(z_load_ct, 2)} Ohm" if CT_PRIMARY_AMP > 0 else "N/A"
+        proof_load_res = f"{v_ph_min_volts:.0f} / {1.2 * CT_PRIMARY_AMP:.1f} = {round(z_load_ct, 2)} Ohm" if CT_PRIMARY_AMP > 0 else "N/A"
 
         # 5. Maximum Resistive Reach Limits
         r_ph_max_limit = FACTOR_PHASE_MAX * z_load_ct
@@ -173,11 +178,16 @@ def calculate(plan: ProtectionPlan, full_config: ProjectConfig, dfs_dict: dict, 
     # 1. Select the correct settings object based on the plan type
     ptype = plan.type.upper()
     if ptype == "INCOMER":
-        std_21_settings = full_config.settings.ansi_21.incomer
+        # Use a copy to prevent modifying the global config object for other calculations
+        std_21_settings = full_config.settings.ansi_21.incomer.copy(deep=True)
     else:
-        # Fallback or define other types like 'transformer' if needed in the future
-        std_21_settings = full_config.settings.ansi_21.incomer
+        std_21_settings = full_config.settings.ansi_21.incomer.copy(deep=True)
     
+    # Override the default CT rating with the specific one from the protection plan
+    parsed_ct_amp = common.parse_ct_primary(plan.ct_primary)
+    if parsed_ct_amp > 0:
+        std_21_settings.ct_primary_amp = parsed_ct_amp
+
     # 2. Get common electrical data
     common_data = common.get_electrical_parameters(plan, full_config, dfs_dict, global_tx_map)
 
