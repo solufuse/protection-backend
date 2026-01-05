@@ -44,11 +44,11 @@ class MiCOM_Safety_Engine:
         # [context:flow] 1. PHYSICAL INPUTS (from common_data and settings)
         I_SC_USER_HYPOTHESIS = self.common_data.get("Ik2min_sec_ref", 0) * 1000
         if I_SC_USER_HYPOTHESIS == 0:
-            I_SC_USER_HYPOTHESIS = 4800.0 # Fallback
+            I_SC_USER_HYPOTHESIS = self.settings.fallback_ik2min_sec_ref_amps # Fallback from config
 
-        NOMINAL_VOLTAGE_KV = self.common_data.get("kVnom_busfrom", 225.0)
+        NOMINAL_VOLTAGE_KV = self.common_data.get("kVnom_busfrom", self.settings.fallback_kvnom_busfrom)
         
-        length_str = self.common_data.get("Lenght_link", "0.008 km").replace("km", "").strip()
+        length_str = self.common_data.get("Lenght_link", self.settings.fallback_length_link_km).replace("km", "").strip()
         L_SPAN_METERS = float(length_str) * 1000
         
         CT_PRIMARY_AMP = self.settings.ct_primary_amp

@@ -34,6 +34,10 @@ class Std21Settings(BaseModel):
     factor_ground_max: float = 0.8
     r1ph_typical_ohm: float = 10.0
     psb_percentage: float = 45.0
+    # Fallback values moved from ansi_21.py
+    fallback_ik2min_sec_ref_amps: float = 4800.0
+    fallback_kvnom_busfrom: float = 225.0
+    fallback_length_link_km: str = "0.008 km"
 
 # New container for typed settings
 class Ansi51Category(BaseModel):
