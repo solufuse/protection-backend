@@ -13,7 +13,7 @@ from .common import get_storage_path, load_workspace_files
 
 router = APIRouter(prefix="/topology", tags=["Topology Analysis"])
 
-ANALYSIS_TYPES = Literal['incomer', 'bus', 'transformer', 'cable', 'coupling']
+ANALYSIS_TYPES = Literal['incomer', 'bus', 'transformer', 'cable', 'coupling', 'incomer_breaker']
 
 @router.post("/analyze")
 async def analyze_topology_endpoint(
