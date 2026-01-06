@@ -18,43 +18,35 @@ from .common import get_storage_path, load_workspace_files
 router = APIRouter(prefix="/topology", tags=["Topology Analysis"])
 
 @router.post("/analyze")
-async def analyze_topology(
+async def analyze_topology_endpoint(
     project_id: Optional[str] = Query(None), 
     user=Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
     """
-    Analyzes the topology of a project by reading iConnect data from relevant files.
-    It scans the user's session or project workspace for database files,
-    extracts the 'iConnect' sheet, and returns the structured topology data.
+    Analyzes the topology of a project, including incomer detection,
+    by reading iConnect and other relevant data from database files.
     """
-    # Determine the correct storage path (user session or project folder)
     target_path = get_storage_path(user, project_id, db)
-    # Load all files from that path
     files = load_workspace_files(target_path)
     if not files:
         raise HTTPException(status_code=404, detail="No files found in the workspace.")
 
     all_results = []
-    # Iterate through each file in the workspace
     for filename, content in files.items():
-        # Process only if it's a recognized database file
         if is_database_file(filename):
-            # Use the setup script to extract topology from the iConnect tab
-            result = topology_setup.extract_topology_from_iconnect(content)
-            # If successful, add the findings to our results list
+            # Pass both content and filename to the new analysis function
+            result = topology_setup.analyze_topology(content, filename)
             if result.get("status") == "success":
                 all_results.append({
                     "file": filename,
-                    "topology": result.get("data", [])
+                    "analysis": result
                 })
 
-    # If no topology data was found in any file, raise an error
     if not all_results:
         raise HTTPException(
             status_code=404, 
-            detail="No topology data could be extracted. Check for valid .SI2S or .LF1S files with an 'iConnect' tab."
+            detail="No topology data could be extracted. Check for valid .SI2S or .LF1S files."
         )
 
-    # Return the successful results
     return {"status": "success", "results": all_results}
