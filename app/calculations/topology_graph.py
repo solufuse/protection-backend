@@ -3,90 +3,117 @@ import networkx as nx
 
 def build_diagram(analysis_result: dict) -> dict:
     """
-    Builds a hierarchical, text-based diagram of the electrical network topology.
+    Builds a React Flow compatible JSON structure of the electrical network.
     """
     G = nx.DiGraph()
-    
     bus_analysis = analysis_result.get('bus_analysis', [])
     if not bus_analysis:
-        return {"diagram": "No bus data found to build the diagram."}
-        
-    bus_voltages = {bus['IDBus']: bus.get('NomlkV', bus.get('BasekV', 0)) for bus in bus_analysis}
+        return {"nodes": [], "edges": []}
 
-    # 1. Nodes are Buses
-    for bus_id in bus_voltages:
+    bus_data = {bus['IDBus']: bus for bus in bus_analysis}
+
+    for bus_id in bus_data:
         G.add_node(bus_id, type='BUS')
 
-    # 2. Edges are connecting equipment
     for conn in analysis_result.get('topology', []):
         from_bus = conn.get('From')
         to_bus = conn.get('ToSec')
-        equip_id = conn.get('ID')
-        equip_type = conn.get('Type', 'LINK').strip()
-
         if G.has_node(from_bus) and G.has_node(to_bus):
-            G.add_edge(from_bus, to_bus, id=equip_id, type=equip_type)
+            # Use a unique key for each edge based on all its properties to allow parallel edges
+            edge_key = f"{from_bus}-{to_bus}-{conn.get('ID')}"
+            G.add_edge(from_bus, to_bus, key=edge_key, data=conn)
 
-    # 3. Find starting points (incomers)
     start_nodes_info = []
     for incomer in analysis_result.get('incomer_analysis', []):
-        source_id = incomer.get('ID', 'SOURCE')
         connected_bus = incomer.get('ConnectedBus')
         if G.has_node(connected_bus):
-            start_nodes_info.append({'bus': connected_bus, 'source_id': source_id})
+            start_nodes_info.append({'bus': connected_bus, 'incomer': incomer})
 
     if not start_nodes_info:
-        return {"diagram": "No incomer found to start the diagram."}
+        return {"nodes": [], "edges": []}
 
-    # 4. Generate the diagram string
-    final_diagram = ""
+    nodes_for_flow = []
+    edges_for_flow = []
     
+    X_SPACING = 300
+    Y_SPACING = 150
+    
+    positions = {}
+    level_y_tracker = {}
+    visited_for_layout = set()
+
     def get_voltage_str(bus_id):
-        voltage = bus_voltages.get(bus_id)
+        bus = bus_data.get(bus_id, {})
+        voltage = bus.get('NomlkV', bus.get('BasekV'))
         if voltage is not None:
             try:
-                voltage_float = float(voltage)
-                if voltage_float >= 1:
-                    return f"{voltage_float:.1f} kV"
-                return f"{voltage_float * 1000:.0f} V"
+                v = float(voltage)
+                return f"{v:.1f} kV" if v >= 1 else f"{v * 1000:.0f} V"
             except (ValueError, TypeError):
-                return "N/A"
+                pass
         return "N/A"
 
-    visited_nodes = set()
-
-    def trace_feeder(bus_node, prefix=""):
-        nonlocal final_diagram
-        if bus_node in visited_nodes:
-            final_diagram += f'{prefix}└─> [Path already displayed: {bus_node}]\n'
+    def assign_positions(node, level=0, parent_y=0):
+        if node in visited_for_layout:
             return
-            
-        visited_nodes.add(bus_node)
+        visited_for_layout.add(node)
+        
+        y_pos = level_y_tracker.get(level, parent_y)
+        positions[node] = {'x': level * X_SPACING, 'y': y_pos}
+        level_y_tracker[level] = y_pos + Y_SPACING
 
-        outgoing_edges = sorted(G.out_edges(bus_node, data=True), key=lambda x: x[1])
+        for successor in sorted(G.successors(node)):
+            assign_positions(successor, level + 1, y_pos)
 
-        for i, (u, v, edge_data) in enumerate(outgoing_edges):
-            is_last = (i == len(outgoing_edges) - 1)
-            branch_char = "└─" if is_last else "├─"
-            new_prefix = prefix + ("    " if is_last else "│   ")
-
-            equip_type = edge_data.get('type', 'LINK')
-            equip_id = edge_data.get('id', '?')
-            
-            final_diagram += f'{prefix}{branch_char}[{equip_type}: {equip_id}]───>'
-            final_diagram += f"BUS: {v} ({get_voltage_str(v)})\n'
-            
-            trace_feeder(v, new_prefix)
-
-    # Main loop to start tracing from each incomer
+    # Run layout starting from sources
+    initial_y = 0
     for start_info in start_nodes_info:
         start_bus = start_info['bus']
-        source_id = start_info['source_id']
-        final_diagram += f"SOURCE: {source_id}\n"
-        final_diagram += f"   │\n"
-        final_diagram += f"   └──────>BUS: {start_bus} ({get_voltage_str(start_bus)})\n"
-        
-        trace_feeder(start_bus, "           ")
-        final_diagram += "\n"
+        assign_positions(start_bus, level=1, parent_y=initial_y)
+        initial_y = max(level_y_tracker.values() or [0]) + Y_SPACING * 2
 
-    return {"diagram": final_diagram.strip()}
+    # Create React Flow nodes and edges
+    nodes_added = set()
+    for start_info in start_nodes_info:
+        start_bus = start_info['bus']
+        incomer = start_info['incomer']
+        source_id = f"source-{incomer['ID']}"
+
+        if start_bus in positions and source_id not in nodes_added:
+            nodes_for_flow.append({
+                "id": source_id,
+                "type": "input",
+                "data": {"label": f"Source: {incomer['ID']}"},
+                "position": {"x": 0, "y": positions[start_bus]['y']}
+            })
+            nodes_added.add(source_id)
+
+            edges_for_flow.append({
+                "id": f"edge-{source_id}-{start_bus}",
+                "source": source_id,
+                "target": start_bus,
+                "label": "Incomer"
+            })
+
+    for bus_id in G.nodes():
+        if bus_id in positions and bus_id not in nodes_added:
+            nodes_for_flow.append({
+                "id": bus_id,
+                "type": "default",
+                "data": {"label": f"{bus_id}\n({get_voltage_str(bus_id)})"},
+                "position": positions[bus_id]
+            })
+            nodes_added.add(bus_id)
+
+    for u, v, d in G.edges(data=True):
+        edge_data = d['data']
+        edge_id = f"edge-{u}-{v}-{edge_data.get('ID')}"
+        label = f"{edge_data.get('Type','').strip()}: {edge_data.get('ID')}"
+        edges_for_flow.append({
+            "id": edge_id,
+            "source": u,
+            "target": v,
+            "label": label
+        })
+
+    return {"nodes": nodes_for_flow, "edges": edges_for_flow}
