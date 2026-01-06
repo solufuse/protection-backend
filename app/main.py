@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine, Base
 # [!] [INFO] Add messages router import
-from .routers import files, admin, projects, storage_admin, debug, users, messages
+from .routers import files, admin, projects, storage_admin, debug, users, messages, topology
 from sqlalchemy import text 
 
 # --- AUTO-MIGRATION ---
@@ -66,6 +66,8 @@ app.include_router(projects.router, prefix="/projects", tags=["Projects"])
 app.include_router(users.router, prefix="/users", tags=["Users (Profile)"])
 # [+] [INFO] New Forum Router
 app.include_router(messages.router, prefix="/messages", tags=["Forum Messages"])
+# [+] [INFO] New Topology Router
+app.include_router(topology.router)
 app.include_router(admin.router, prefix="/admin", tags=["Global Admin"])
 app.include_router(storage_admin.router, prefix="/admin/storage", tags=["Storage"])
 app.include_router(debug.router, prefix="/debug", tags=["Debug"])
