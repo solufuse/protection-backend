@@ -12,15 +12,8 @@ def get_col_name(df, candidates):
 
 def analyze_topology(file_content: bytes, filename: str) -> dict:
     """
-    Analyzes file content to extract topology, identify the grid incomer,
-    and identify transformers with their voltage levels.
-
-    Args:
-        file_content: The content of the file to analyze.
-        filename: The name of the file, used to determine the analysis logic.
-
-    Returns:
-        A dictionary with topology data, incomer info, and transformer info.
+    Analyzes file content to extract topology and identify key components like
+    incomers, transformers, cables, and buses.
     """
     dataframes = db_converter.extract_data_from_db(file_content)
     if not dataframes:
@@ -92,15 +85,42 @@ def analyze_topology(file_content: bytes, filename: str) -> dict:
                     row[xfmr_to_col] in iconnect_nodes):
                     entry = row.to_dict()
                     entry['topology_calculated'] = 'TRANSFORMER'
-                    
                     if prim_kv_col and pd.notna(row[prim_kv_col]):
                         entry['primary_voltage_kV'] = row[prim_kv_col]
                     if sec_kv_col and pd.notna(row[sec_kv_col]):
                         entry['secondary_voltage_kV'] = row[sec_kv_col]
-
                     transformer_info.append(entry)
 
-    # --- 4. Consolidate Results ---
+    # --- 4. Identify Cables ---
+    cable_info = []
+    df_icable = next((df for name, df in dataframes.items() if name.upper() in ['ICABLE', 'CABLE']), None)
+    if df_icable is not None:
+        cable_id_col = get_col_name(df_icable, ['ID', 'NAME'])
+        cable_from_col = get_col_name(df_icable, ['FROMBUS', 'FROM'])
+        cable_to_col = get_col_name(df_icable, ['TOBUS', 'TO'])
+
+        if all([cable_id_col, cable_from_col, cable_to_col]):
+            for _, row in df_icable.iterrows():
+                if (row[cable_id_col] in iconnect_nodes or 
+                    row[cable_from_col] in iconnect_nodes or 
+                    row[cable_to_col] in iconnect_nodes):
+                    entry = row.to_dict()
+                    entry['topology_calculated'] = 'CABLE'
+                    cable_info.append(entry)
+
+    # --- 5. Identify Buses ---
+    bus_info = []
+    df_ibus = next((df for name, df in dataframes.items() if name.upper() in ['IBUS', 'BUS']), None)
+    if df_ibus is not None:
+        bus_id_col = get_col_name(df_ibus, ['IDBUS', 'ID'])
+        if bus_id_col:
+            for _, row in df_ibus.iterrows():
+                if row[bus_id_col] in iconnect_nodes:
+                    entry = row.to_dict()
+                    entry['topology_calculated'] = 'BUS'
+                    bus_info.append(entry)
+
+    # --- 6. Consolidate Results ---
     topology_data = df_iconnect.to_dict(orient='records')
 
     return {
@@ -108,5 +128,7 @@ def analyze_topology(file_content: bytes, filename: str) -> dict:
         "message": f"Analyzed {len(topology_data)} topology entries.",
         "topology": topology_data,
         "incomer_analysis": incomer_info,
-        "transformer_analysis": transformer_info
+        "transformer_analysis": transformer_info,
+        "cable_analysis": cable_info,
+        "bus_analysis": bus_info
     }
