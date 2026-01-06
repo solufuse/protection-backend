@@ -5,7 +5,7 @@ from typing import Optional, List, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.calculations import topology_setup
+from app.calculations import topology_setup, topology_graph
 from app.calculations.file_utils import is_database_file
 from ..database import get_db
 from ..auth import get_current_user
@@ -73,3 +73,43 @@ async def analyze_topology_endpoint(
         raise HTTPException(status_code=404, detail=f"No topology data could be extracted from processed '{file_type}' files.")
 
     return {"status": "success", "results": all_results}
+
+@router.post("/diagram")
+async def get_topology_diagram(
+    project_id: Optional[str] = Query(None),
+    file_type: Literal['all', 'si2s', 'lf1s'] = Query(
+        'all', 
+        description="Specify the type of file to analyze: 'si2s', 'lf1s', or 'all'."
+    ),
+    user=Depends(get_current_user), 
+    db: Session = Depends(get_db)
+):
+    """
+    Generates a hierarchical text-based diagram of the network topology.
+    """
+    target_path = get_storage_path(user, project_id, db)
+    files = load_workspace_files(target_path)
+    if not files:
+        raise HTTPException(status_code=404, detail="No files found in the workspace.")
+
+    all_diagrams = []
+    for filename, content in files.items():
+        if not is_database_file(filename):
+            continue
+
+        file_ext = filename.lower().split('.')[-1]
+        if file_type != 'all' and file_ext != file_type:
+            continue
+
+        analysis_result = topology_setup.analyze_topology(content, filename)
+        if analysis_result.get("status") == "success":
+            diagram = topology_graph.build_diagram(analysis_result)
+            all_diagrams.append({"file": filename, "diagram": diagram})
+
+    if not all_diagrams:
+        raise HTTPException(
+            status_code=404, 
+            detail="Could not generate any diagrams. Check if topology analysis yields results."
+        )
+
+    return {"status": "success", "results": all_diagrams}
