@@ -11,7 +11,7 @@ def build_diagram(analysis_result: dict) -> dict:
     if not bus_analysis:
         return {"diagram": "No bus data found to build the diagram."}
         
-    bus_voltages = {bus['IDBus']: bus.get('BasekV', 0) for bus in bus_analysis}
+    bus_voltages = {bus['IDBus']: bus.get('NomlkV', bus.get('BasekV', 0)) for bus in bus_analysis}
 
     # 1. Nodes are Buses
     for bus_id in bus_voltages:
@@ -44,9 +44,13 @@ def build_diagram(analysis_result: dict) -> dict:
     def get_voltage_str(bus_id):
         voltage = bus_voltages.get(bus_id)
         if voltage is not None:
-            if voltage >= 1:
-                return f"{voltage:.1f} kV"
-            return f"{voltage * 1000:.0f} V"
+            try:
+                voltage_float = float(voltage)
+                if voltage_float >= 1:
+                    return f"{voltage_float:.1f} kV"
+                return f"{voltage_float * 1000:.0f} V"
+            except (ValueError, TypeError):
+                return "N/A"
         return "N/A"
 
     visited_nodes = set()
