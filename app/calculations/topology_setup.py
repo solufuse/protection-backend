@@ -12,14 +12,15 @@ def get_col_name(df, candidates):
 
 def analyze_topology(file_content: bytes, filename: str) -> dict:
     """
-    Analyzes file content to extract topology and identify the grid incomer.
+    Analyzes file content to extract topology, identify the grid incomer,
+    and identify transformers with their voltage levels.
 
     Args:
         file_content: The content of the file to analyze.
         filename: The name of the file, used to determine the analysis logic.
 
     Returns:
-        A dictionary with the topology data and incomer information.
+        A dictionary with topology data, incomer info, and transformer info.
     """
     dataframes = db_converter.extract_data_from_db(file_content)
     if not dataframes:
@@ -34,7 +35,6 @@ def analyze_topology(file_content: bytes, filename: str) -> dict:
         return {"status": "error", "message": "Could not find 'iConnect' or equivalent data table."}
 
     id_col = get_col_name(df_iconnect, ['ID', 'NAME'])
-    type_col = get_col_name(df_iconnect, ['TYPE'])
     from_col = get_col_name(df_iconnect, ['FROM', 'FROMBUS'])
     tosec_col = get_col_name(df_iconnect, ['TOSEC'])
     if not all([id_col, from_col, tosec_col]):
@@ -66,27 +66,47 @@ def analyze_topology(file_content: bytes, filename: str) -> dict:
                 matched_sources = df_lfsource[df_lfsource[id_term_bus_col].isin(iconnect_nodes)].copy()
                 if not matched_sources.empty:
                     matched_sources['voltage_level'] = pd.to_numeric(matched_sources[kv_col], errors='coerce').fillna(0)
-                    # Sort by voltage (desc) to find the highest voltage -> Incomer
                     sorted_sources = matched_sources.sort_values(by='voltage_level', ascending=False)
-                    
-                    # Assign voltage level ranks
                     voltage_ranks = {kv: rank for rank, kv in enumerate(sorted(sorted_sources['voltage_level'].unique(), reverse=True), 1)}
                     sorted_sources['voltage_rank'] = sorted_sources['voltage_level'].map(voltage_ranks)
 
                     for _, row in sorted_sources.iterrows():
                         entry = row.to_dict()
-                        if row['voltage_rank'] == 1:
-                            entry['topology_calculated'] = 'INCOMER'
-                        else:
-                            entry['topology_calculated'] = f'LEVEL_{row["voltage_rank"]}'
+                        entry['topology_calculated'] = 'INCOMER' if row['voltage_rank'] == 1 else f'LEVEL_{row["voltage_rank"]}'
                         incomer_info.append(entry)
 
-    # --- 3. Consolidate Results ---
+    # --- 3. Identify Transformers ---
+    transformer_info = []
+    df_ixfmr2 = next((df for name, df in dataframes.items() if name.upper() in ['IXFMR2', 'XFMR2']), None)
+    if df_ixfmr2 is not None:
+        xfmr_id_col = get_col_name(df_ixfmr2, ['ID', 'NAME'])
+        xfmr_from_col = get_col_name(df_ixfmr2, ['FROMBUS', 'FROM'])
+        xfmr_to_col = get_col_name(df_ixfmr2, ['TOBUS', 'TO'])
+        prim_kv_col = get_col_name(df_ixfmr2, ['PRIMKV'])
+        sec_kv_col = get_col_name(df_ixfmr2, ['SECKV'])
+
+        if all([xfmr_id_col, xfmr_from_col, xfmr_to_col]):
+            for _, row in df_ixfmr2.iterrows():
+                if (row[xfmr_id_col] in iconnect_nodes or 
+                    row[xfmr_from_col] in iconnect_nodes or 
+                    row[xfmr_to_col] in iconnect_nodes):
+                    entry = row.to_dict()
+                    entry['topology_calculated'] = 'TRANSFORMER'
+                    
+                    if prim_kv_col and pd.notna(row[prim_kv_col]):
+                        entry['primary_voltage_kV'] = row[prim_kv_col]
+                    if sec_kv_col and pd.notna(row[sec_kv_col]):
+                        entry['secondary_voltage_kV'] = row[sec_kv_col]
+
+                    transformer_info.append(entry)
+
+    # --- 4. Consolidate Results ---
     topology_data = df_iconnect.to_dict(orient='records')
 
     return {
         "status": "success",
         "message": f"Analyzed {len(topology_data)} topology entries.",
         "topology": topology_data,
-        "incomer_analysis": incomer_info
+        "incomer_analysis": incomer_info,
+        "transformer_analysis": transformer_info
     }
