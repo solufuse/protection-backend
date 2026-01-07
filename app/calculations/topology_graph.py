@@ -4,8 +4,8 @@ from collections import defaultdict
 
 def build_diagram(analysis_result: dict) -> dict:
     """
-    Builds a React Flow compatible JSON structure with a layout algorithm focused on creating 
-    straight, clear, block-like vertical alignments, as requested by the user.
+    Builds a React Flow compatible JSON structure with a greedy, single-pass layout algorithm 
+    that prioritizes straight vertical lines and resolves overlaps.
     """
     nodes_for_flow = []
     edges_for_flow = []
@@ -33,79 +33,72 @@ def build_diagram(analysis_result: dict) -> dict:
             G.add_edge(from_node, conn_id)
             G.add_edge(conn_id, to_node)
 
-    # 2. Straight-Line Layout Algorithm
+    # 2. Advanced Layout Algorithm
     positions = {}
     node_widths = { nid: (350 if d.get('component_type') == 'Bus' else 120) for nid, d in all_equipment.items() }
 
     try:
-        # A. Assign Levels (Y-position)
+        # A. Assign Levels (Y-position) & Initial Horizontal Order
+        if not nx.is_directed_acyclic_graph(G):
+             raise nx.NetworkXUnfeasible("Graph has cycles, cannot use topological layout.")
+
         nodes_by_level = defaultdict(list)
         for i, generation in enumerate(nx.topological_generations(G)):
             for node in sorted(generation):
                 nodes_by_level[i].append(node)
         max_level = len(nodes_by_level) - 1
 
-        # B. Determine Horizontal Order (to minimize crossings)
         node_order = {}
-        # Initialize order based on initial sorted position
         for level, nodes in nodes_by_level.items():
             for i, node in enumerate(nodes):
                 node_order[node] = i
-        
-        # Use barycenter method to refine order and reduce crossings
-        for _ in range(10):
+        for _ in range(5):
             for level in range(1, max_level + 1):
-                barycenters = {n: (sum(node_order.get(p, i) for p in G.predecessors(n)) / len(list(G.predecessors(n)))) if G.predecessors(n) else i for i, n in enumerate(nodes_by_level[level])}
-                nodes_by_level[level].sort(key=lambda n: (barycenters.get(n, -1), node_order.get(n)))
+                barycenters = {n: sum(node_order.get(p, 0) for p in G.predecessors(n)) / len(list(G.predecessors(n))) if G.predecessors(n) else -1 for n in nodes_by_level[level]}
+                nodes_by_level[level].sort(key=lambda n: barycenters.get(n, -1))
                 for i, node in enumerate(nodes_by_level[level]):
                     node_order[node] = i
 
-        sorted_levels = {lvl: sorted(nodes, key=lambda n: node_order.get(n, 0)) for lvl, nodes in nodes_by_level.items()}
+        sorted_levels = nodes_by_level
 
-        # C. Assign Coordinates with Strict Alignment
-        Y_SPACING, X_PADDING = 250, 100
-        
-        # Pass 1: Ideal X-position with alignment enforcement
-        current_x = 0
+        # B. Greedy Placement (Top-down, level by level)
+        Y_SPACING, X_PADDING = 250, 75
         for level in range(max_level + 1):
             y_pos = level * Y_SPACING
-            if level == 0:
-                # Initial placement for root nodes
-                for node_id in sorted_levels.get(level, []):
-                    positions[node_id] = {'x': current_x, 'y': y_pos}
-                    current_x += node_widths.get(node_id, 120) + X_PADDING
-                continue
+            last_node_end_x = -float('inf')
 
-            for node_id in sorted_levels.get(level, []):
+            for i, node_id in enumerate(sorted_levels[level]):
+                width = node_widths[node_id]
+                ideal_x = last_node_end_x + X_PADDING if i > 0 else 0
+
                 parents = list(G.predecessors(node_id))
-                ideal_x = 0
                 if parents:
-                    is_straight_line = len(parents) == 1 and len(list(G.successors(parents[0]))) == 1
-                    if is_straight_line:
-                        parent_center_x = positions[parents[0]]['x'] + node_widths[parents[0]] / 2
-                        ideal_x = parent_center_x - node_widths[node_id] / 2
-                    else:
-                        parent_centers = [positions[p]['x'] + node_widths[p] / 2 for p in parents]
-                        ideal_x = sum(parent_centers) / len(parent_centers) - node_widths[node_id] / 2
-                
-                positions[node_id] = {'x': ideal_x, 'y': y_pos}
+                    parent_centers = [positions[p]['x'] + node_widths[p] / 2 for p in parents if p in positions]
+                    if parent_centers:
+                        ideal_x = sum(parent_centers) / len(parent_centers) - width / 2
 
-        # Pass 2: Resolve overlaps by shifting blocks
-        for level in range(max_level + 1):
-            level_nodes = sorted_levels.get(level, [])
-            for i in range(1, len(level_nodes)):
-                prev_node, curr_node = level_nodes[i-1], level_nodes[i]
-                required_x = positions[prev_node]['x'] + node_widths[prev_node] + X_PADDING
-                if positions[curr_node]['x'] < required_x:
-                    shift = required_x - positions[curr_node]['x']
-                    for j in range(i, len(level_nodes)):
-                        positions[level_nodes[j]]['x'] += shift
-        
-        # Pass 3: Center the diagram
-        min_x = min((p.get('x', 0) for p in positions.values()), default=0)
+                # Force alignment for straight lines is a priority
+                if len(parents) == 1 and len(list(G.successors(parents[0]))) == 1:
+                    parent_center_x = positions[parents[0]]['x'] + node_widths[parents[0]] / 2
+                    aligned_x = parent_center_x - width / 2
+                    # This aligned position must still respect the overlap constraint
+                    final_x = max(aligned_x, last_node_end_x + X_PADDING if i > 0 else -float('inf'))
+                else:
+                    # Not a straight line, so just prevent overlap
+                    final_x = max(ideal_x, last_node_end_x + X_PADDING if i > 0 else -float('inf'))
+
+                positions[node_id] = {'x': final_x, 'y': y_pos}
+                last_node_end_x = final_x + width
+
+        # C. Center the entire diagram
+        min_x = min((p['x'] for p in positions.values()), default=0)
+        max_x = max((p['x'] + node_widths[nid] for nid, p in positions.items()), default=0)
+        diagram_width = max_x - min_x
+        shift = -min_x
+
         for node_id in G.nodes():
             if node_id in positions:
-                positions[node_id]['x'] -= min_x
+                positions[node_id]['x'] += shift
 
     except (nx.NetworkXUnfeasible, nx.NetworkXError) as e:
         print(f"Graph layout error: {e}. Fallback to basic layout.")
