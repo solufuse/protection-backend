@@ -4,8 +4,9 @@ from collections import defaultdict
 
 def build_diagram(analysis_result: dict) -> dict:
     """
-    Builds a React Flow compatible JSON structure with a greedy, single-pass layout algorithm 
-    that prioritizes straight vertical lines and resolves overlaps.
+    Builds a React Flow diagram using a two-pass layout algorithm.
+    Pass 1: Idealistic placement with perfect vertical alignment, ignoring overlaps.
+    Pass 2: Overlap resolution by shifting entire branches.
     """
     nodes_for_flow = []
     edges_for_flow = []
@@ -38,67 +39,66 @@ def build_diagram(analysis_result: dict) -> dict:
     node_widths = { nid: (350 if d.get('component_type') == 'Bus' else 120) for nid, d in all_equipment.items() }
 
     try:
-        # A. Assign Levels (Y-position) & Initial Horizontal Order
         if not nx.is_directed_acyclic_graph(G):
-             raise nx.NetworkXUnfeasible("Graph has cycles, cannot use topological layout.")
+             raise nx.NetworkXUnfeasible("Graph has cycles.")
 
+        # A. Pre-computation: Levels and Order
         nodes_by_level = defaultdict(list)
         for i, generation in enumerate(nx.topological_generations(G)):
-            for node in sorted(generation):
-                nodes_by_level[i].append(node)
+            nodes_by_level[i] = sorted(list(generation))
         max_level = len(nodes_by_level) - 1
-
-        node_order = {}
-        for level, nodes in nodes_by_level.items():
-            for i, node in enumerate(nodes):
-                node_order[node] = i
-        for _ in range(5):
+        
+        node_order = {node: i for level in nodes_by_level.values() for i, node in enumerate(level)}
+        for _ in range(8):
             for level in range(1, max_level + 1):
                 barycenters = {n: sum(node_order.get(p, 0) for p in G.predecessors(n)) / len(list(G.predecessors(n))) if G.predecessors(n) else -1 for n in nodes_by_level[level]}
                 nodes_by_level[level].sort(key=lambda n: barycenters.get(n, -1))
-                for i, node in enumerate(nodes_by_level[level]):
-                    node_order[node] = i
+                for i, node in enumerate(nodes_by_level[level]): node_order[node] = i
 
-        sorted_levels = nodes_by_level
-
-        # B. Greedy Placement (Top-down, level by level)
-        Y_SPACING, X_PADDING = 250, 75
+        # B. Pass 1: Idealistic Placement (Enforce alignment, ignore overlaps)
+        Y_SPACING = 250
         for level in range(max_level + 1):
-            y_pos = level * Y_SPACING
-            last_node_end_x = -float('inf')
-
-            for i, node_id in enumerate(sorted_levels[level]):
+            for node_id in nodes_by_level[level]:
                 width = node_widths[node_id]
-                ideal_x = last_node_end_x + X_PADDING if i > 0 else 0
-
                 parents = list(G.predecessors(node_id))
+                ideal_x = 0
+                
                 if parents:
                     parent_centers = [positions[p]['x'] + node_widths[p] / 2 for p in parents if p in positions]
                     if parent_centers:
+                        # Default to barycenter
                         ideal_x = sum(parent_centers) / len(parent_centers) - width / 2
+                    # Strict alignment for 1-to-1 connections is the highest priority
+                    if len(parents) == 1 and len(list(G.successors(parents[0]))) == 1:
+                         parent_center_x = positions[parents[0]]['x'] + node_widths[parents[0]] / 2
+                         ideal_x = parent_center_x - width / 2
+                
+                positions[node_id] = {'x': ideal_x, 'y': level * Y_SPACING}
 
-                # Force alignment for straight lines is a priority
-                if len(parents) == 1 and len(list(G.successors(parents[0]))) == 1:
-                    parent_center_x = positions[parents[0]]['x'] + node_widths[parents[0]] / 2
-                    aligned_x = parent_center_x - width / 2
-                    # This aligned position must still respect the overlap constraint
-                    final_x = max(aligned_x, last_node_end_x + X_PADDING if i > 0 else -float('inf'))
-                else:
-                    # Not a straight line, so just prevent overlap
-                    final_x = max(ideal_x, last_node_end_x + X_PADDING if i > 0 else -float('inf'))
+        # C. Pass 2: Resolve Overlaps by Shifting Entire Branches
+        X_PADDING = 75
+        all_descendants = {n: list(nx.descendants(G, n)) for n in G.nodes()}
+        for level in range(max_level + 1):
+            level_nodes = nodes_by_level[level]
+            for i in range(1, len(level_nodes)):
+                curr_node = level_nodes[i]
+                prev_node = level_nodes[i-1]
 
-                positions[node_id] = {'x': final_x, 'y': y_pos}
-                last_node_end_x = final_x + width
+                required_x = positions[prev_node]['x'] + node_widths[prev_node] + X_PADDING
+                if positions[curr_node]['x'] < required_x:
+                    shift = required_x - positions[curr_node]['x']
+                    
+                    nodes_to_shift = [curr_node] + all_descendants.get(curr_node, [])
+                    for node_to_shift in nodes_to_shift:
+                        if node_to_shift in positions:
+                            positions[node_to_shift]['x'] += shift
 
-        # C. Center the entire diagram
-        min_x = min((p['x'] for p in positions.values()), default=0)
-        max_x = max((p['x'] + node_widths[nid] for nid, p in positions.items()), default=0)
-        diagram_width = max_x - min_x
-        shift = -min_x
-
-        for node_id in G.nodes():
-            if node_id in positions:
-                positions[node_id]['x'] += shift
+        # D. Centering the Diagram
+        if positions:
+            min_x = min((p['x'] for p in positions.values()), default=0)
+            shift_x = -min_x
+            for node_id in positions:
+                positions[node_id]['x'] += shift_x
 
     except (nx.NetworkXUnfeasible, nx.NetworkXError) as e:
         print(f"Graph layout error: {e}. Fallback to basic layout.")
