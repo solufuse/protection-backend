@@ -4,8 +4,8 @@ from collections import defaultdict
 
 def build_diagram(analysis_result: dict) -> dict:
     """
-    Builds a React Flow diagram using a "Horizontal Center & Shift" layout algorithm 
-    with fixed node sizes for a clean, uniform appearance.
+    Builds a React Flow diagram using a "Vertical Center & Shift" layout algorithm 
+    with fixed node sizes for a clean, uniform top-to-bottom appearance.
     """
     nodes_for_flow = []
     edges_for_flow = []
@@ -33,18 +33,16 @@ def build_diagram(analysis_result: dict) -> dict:
             G.add_edge(from_node, conn_id)
             G.add_edge(conn_id, to_node)
 
-    # --- LAYOUT ALGORITHM: "Horizontal Center & Shift" ---
+    # --- LAYOUT ALGORITHM: "Vertical Center & Shift" ---
     positions = {}
-    # Define a fixed, optimal size for all nodes for consistency.
-    OPTIMAL_HEIGHT = 900
-    OPTIMAL_WIDTH = 500
-    node_heights = {nid: OPTIMAL_HEIGHT for nid in all_equipment}
+    OPTIMAL_WIDTH = 400
+    OPTIMAL_HEIGHT = 300
 
     try:
         if not nx.is_directed_acyclic_graph(G):
             raise nx.NetworkXUnfeasible("Graph has cycles.")
 
-        # A. Assign levels (X-coordinates) and pre-sort nodes to minimize crossings
+        # A. Assign levels (Y-coordinates) and pre-sort nodes to minimize crossings
         nodes_by_level = defaultdict(list)
         for i, generation in enumerate(nx.topological_generations(G)):
             nodes_by_level[i] = sorted(list(generation))
@@ -57,43 +55,43 @@ def build_diagram(analysis_result: dict) -> dict:
                 nodes_by_level[level].sort(key=lambda n: barycenters.get(n, -1))
                 for i, node in enumerate(nodes_by_level[level]): node_order[node] = i
 
-        # B. Pass 1: Idealistic Placement (Center next to parents)
-        X_SPACING = OPTIMAL_WIDTH + 150 # Adjust spacing based on the new fixed width
+        # B. Pass 1: Idealistic Placement (Center under parents)
+        Y_SPACING = OPTIMAL_HEIGHT + 150 # Vertical spacing
         for level in range(max_level + 1):
             for node_id in nodes_by_level[level]:
-                height = OPTIMAL_HEIGHT
-                ideal_y = 0
+                width = OPTIMAL_WIDTH
+                ideal_x = 0
                 parents = list(G.predecessors(node_id))
                 if parents and all(p in positions for p in parents):
-                    parent_centers = [positions[p]['y'] + OPTIMAL_HEIGHT / 2 for p in parents]
-                    ideal_y = sum(parent_centers) / len(parent_centers) - height / 2
-                positions[node_id] = {'x': level * X_SPACING, 'y': ideal_y}
+                    parent_centers = [positions[p]['x'] + OPTIMAL_WIDTH / 2 for p in parents]
+                    ideal_x = sum(parent_centers) / len(parent_centers) - width / 2
+                positions[node_id] = {'x': ideal_x, 'y': level * Y_SPACING}
         
-        # C. Pass 2: Resolve Overlaps by Shifting Subtrees Downwards
-        Y_PADDING = 100
+        # C. Pass 2: Resolve Overlaps by Shifting Subtrees to the Right
+        X_PADDING = 100
         all_descendants = {n: nx.descendants(G, n) for n in G.nodes()}
         for level in range(max_level + 1):
             level_nodes = nodes_by_level[level]
-            level_nodes.sort(key=lambda n: positions[n]['y'])
+            level_nodes.sort(key=lambda n: positions[n]['x'])
             
             for i in range(1, len(level_nodes)):
-                upper_node, lower_node = level_nodes[i-1], level_nodes[i]
-                upper_bound = positions[upper_node]['y'] + OPTIMAL_HEIGHT
-                lower_bound = positions[lower_node]['y']
+                left_node, right_node = level_nodes[i-1], level_nodes[i]
+                left_bound = positions[left_node]['x'] + OPTIMAL_WIDTH
+                right_bound = positions[right_node]['x']
                 
-                if lower_bound < upper_bound + Y_PADDING:
-                    shift = (upper_bound + Y_PADDING) - lower_bound
-                    nodes_to_shift = all_descendants[lower_node].union({lower_node})
+                if right_bound < left_bound + X_PADDING:
+                    shift = (left_bound + X_PADDING) - right_bound
+                    nodes_to_shift = all_descendants[right_node].union({right_node})
                     for node_to_shift in nodes_to_shift:
                         if node_to_shift in positions:
-                            positions[node_to_shift]['y'] += shift
+                            positions[node_to_shift]['x'] += shift
 
-        # D. Final Vertical Centering
+        # D. Final Horizontal Centering
         if positions:
-            min_y = min((p['y'] for p in positions.values()), default=0)
-            if min_y < 0:
+            min_x = min((p['x'] for p in positions.values()), default=0)
+            if min_x < 0:
                 for node_id in positions:
-                    positions[node_id]['y'] -= min_y
+                    positions[node_id]['x'] -= min_x
 
     except (nx.NetworkXUnfeasible, nx.NetworkXError) as e:
         print(f"Graph layout error: {e}.")
