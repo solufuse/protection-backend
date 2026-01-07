@@ -54,18 +54,30 @@ def build_diagram(analysis_result: dict) -> dict:
         for _ in range(8): # More iterations for better convergence
             # Downward pass
             for level in range(1, max_level + 1):
-                barycenters = {node: sum(node_order[p] for p in G.predecessors(node)) / len(list(G.predecessors(node))) if G.predecessors(node) else -1 for node in nodes_by_level[level]}
-                sorted_nodes = sorted(nodes_by_level[level], key=lambda n: (barycenters[n], node_order[n]))
+                barycenters = {}
+                for node in nodes_by_level[level]:
+                    preds = list(G.predecessors(node))
+                    if preds:
+                        barycenters[node] = sum(node_order.get(p, 0) for p in preds) / len(preds)
+                    else:
+                        barycenters[node] = -1
+                sorted_nodes = sorted(nodes_by_level[level], key=lambda n: (barycenters.get(n, -1), node_order.get(n, 0)))
                 for i, node in enumerate(sorted_nodes):
                     node_order[node] = i
             # Upward pass
             for level in range(max_level - 1, -1, -1):
-                barycenters = {node: sum(node_order[c] for c in G.successors(node)) / len(list(G.successors(node))) if G.successors(node) else -1 for node in nodes_by_level[level]}
-                sorted_nodes = sorted(nodes_by_level[level], key=lambda n: (barycenters[n], node_order[n]))
+                barycenters = {}
+                for node in nodes_by_level[level]:
+                    succs = list(G.successors(node))
+                    if succs:
+                        barycenters[node] = sum(node_order.get(c, 0) for c in succs) / len(succs)
+                    else:
+                        barycenters[node] = -1
+                sorted_nodes = sorted(nodes_by_level[level], key=lambda n: (barycenters.get(n, -1), node_order.get(n, 0)))
                 for i, node in enumerate(sorted_nodes):
                     node_order[node] = i
 
-        sorted_levels = {lvl: sorted(nodes, key=lambda n: node_order[n]) for lvl, nodes in nodes_by_level.items()}
+        sorted_levels = {lvl: sorted(nodes, key=lambda n: node_order.get(n, 0)) for lvl, nodes in nodes_by_level.items()}
 
         # C. Assign Final Coordinates (Placement & Compaction)
         Y_SPACING, X_PADDING = 250, 75
@@ -75,7 +87,7 @@ def build_diagram(analysis_result: dict) -> dict:
             y_pos = level * Y_SPACING
             for node_id in sorted_levels.get(level, []):
                 parent_x_centers = [positions[p]['x'] + node_widths[p] / 2 for p in G.predecessors(node_id) if p in positions]
-                ideal_x = (sum(parent_x_centers) / len(parent_x_centers)) - node_widths[node_id] / 2 if parent_x_centers else node_order[node_id] * (120 + X_PADDING)
+                ideal_x = (sum(parent_x_centers) / len(parent_x_centers)) - node_widths[node_id] / 2 if parent_x_centers else node_order.get(node_id, 0) * (120 + X_PADDING)
                 positions[node_id] = {'x': ideal_x, 'y': y_pos}
         
         # Pass 2: Resolve overlaps (compaction) level by level
@@ -83,9 +95,9 @@ def build_diagram(analysis_result: dict) -> dict:
             level_nodes = sorted_levels.get(level, [])
             for i in range(1, len(level_nodes)):
                 prev_node, curr_node = level_nodes[i-1], level_nodes[i]
+                if prev_node not in positions or curr_node not in positions: continue
                 required_x = positions[prev_node]['x'] + node_widths[prev_node] + X_PADDING
                 if positions[curr_node]['x'] < required_x:
-                    # Push the current node and all subsequent nodes to the right
                     shift = required_x - positions[curr_node]['x']
                     for j in range(i, len(level_nodes)):
                         positions[level_nodes[j]]['x'] += shift
@@ -94,30 +106,34 @@ def build_diagram(analysis_result: dict) -> dict:
         max_width = 0
         for level in range(max_level + 1):
             level_nodes = sorted_levels.get(level, [])
-            if not level_nodes: continue
+            if not level_nodes or level_nodes[-1] not in positions or level_nodes[0] not in positions: continue
             level_width = positions[level_nodes[-1]]['x'] + node_widths[level_nodes[-1]] - positions[level_nodes[0]]['x']
             if level_width > max_width:
                 max_width = level_width
 
         for level in range(max_level + 1):
             level_nodes = sorted_levels.get(level, [])
-            if not level_nodes: continue
+            if not level_nodes or level_nodes[-1] not in positions or level_nodes[0] not in positions: continue
             level_width = positions[level_nodes[-1]]['x'] + node_widths[level_nodes[-1]] - positions[level_nodes[0]]['x']
             offset = (max_width - level_width) / 2
             for node_id in level_nodes:
                 positions[node_id]['x'] -= positions[level_nodes[0]]['x'] - offset
 
-    except nx.NetworkXUnfeasible:
-        print("Graph has cycles, layout may be suboptimal.")
+    except (nx.NetworkXUnfeasible, nx.NetworkXError) as e:
+        print(f"Graph layout error: {e}. Graph may have cycles or be disconnected, using fallback.")
 
     # 3. Generate React Flow JSON
     for node_id, data in all_equipment.items():
-        w, h = node_widths[node_id], (25 if data.get('component_type') == 'Bus' else 70)
+        w = node_widths.get(node_id, 120)
+        h = 25 if data.get('component_type') == 'Bus' else 70
         vn_str = ""
         if data.get('component_type') == 'Bus':
             vn_kv = data.get('NomlkV', data.get('BasekV', ''))
-            try: vn_str = f" ({float(vn_kv):.1f} kV)" if float(vn_kv) >= 1 else f" ({float(vn_kv)*1000:.0f} V)"
-            except (ValueError, TypeError): vn_str = f" ({vn_kv})"
+            try: 
+                vn = float(vn_kv)
+                vn_str = f" ({vn:.1f} kV)" if vn >= 1 else f" ({vn*1000:.0f} V)"
+            except (ValueError, TypeError): 
+                vn_str = f" ({vn_kv})" if vn_kv else ""
 
         nodes_for_flow.append({
             "id": node_id, "type": "custom", "position": positions.get(node_id, {'x': 0, 'y': 0}),
