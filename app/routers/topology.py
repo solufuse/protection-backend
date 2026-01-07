@@ -86,9 +86,48 @@ async def _run_and_save_topology(
         "full_path": f"/topology_results/{output_filename}"
     }
 
+async def _build_and_save_diagrams(
+    basename: str,
+    files_to_process: Dict[str, bytes],
+    target_path: str
+):
+    if len(basename) > 20:
+        raise HTTPException(400, "Basename too long (max 20 characters).")
+    safe_basename = "".join([c for c in basename if c.isalnum() or c in ('-', '_')])
+    if not safe_basename: safe_basename = "diagram_result"
+
+    all_diagrams = []
+    for filename, content in files_to_process.items():
+        analysis_result = topology_setup.analyze_topology(content, filename)
+        if analysis_result.get("status") == "success":
+            diagram = topology_graph.build_diagram(analysis_result)
+            all_diagrams.append({"file": filename, "diagram": diagram})
+
+    if not all_diagrams:
+        raise HTTPException(status_code=404, detail="Could not generate any diagrams for the provided files.")
+
+    results_to_save = {"status": "success", "results": all_diagrams}
+    archive_dir = os.path.join(target_path, "diagram_results")
+    if not os.path.exists(archive_dir):
+        os.makedirs(archive_dir, exist_ok=True)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"{safe_basename}_{timestamp}.json"
+    output_path = os.path.join(archive_dir, output_filename)
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(jsonable_encoder(results_to_save), f, indent=2, default=str)
+
+    return {
+        "status": "saved",
+        "folder": "diagram_results",
+        "filename": output_filename,
+        "full_path": f"/diagram_results/{output_filename}"
+    }
+
 @router.post("/run-and-save/all", description="Run analysis on all files and save results.")
 async def run_save_topology_all(
-    basename: str = "topology_res",
+    basename: str = "topo_res",
     project_id: Optional[str] = Query(None),
     file_type: Literal['all', 'si2s', 'lf1s'] = Query('all'),
     analysis_types: Optional[List[ANALYSIS_TYPES]] = Query(None),
@@ -115,7 +154,7 @@ async def run_save_topology_all(
 @router.post("/run-and-save/bulk", description="Run analysis on a list of files and save results.")
 async def run_save_topology_bulk(
     payload: FileListPayload,
-    basename: str = "topology_res_bulk",
+    basename: str = "topo_res_b",
     project_id: Optional[str] = Query(None),
     analysis_types: Optional[List[ANALYSIS_TYPES]] = Query(None),
     user=Depends(get_current_user),
@@ -135,7 +174,7 @@ async def run_save_topology_bulk(
 @router.post("/run-and-save/single/{filename:path}", description="Run analysis on a single file and save results.")
 async def run_save_topology_single(
     filename: str,
-    basename: str = "topology_res_single",
+    basename: str = "topo_res_r",
     project_id: Optional[str] = Query(None),
     analysis_types: Optional[List[ANALYSIS_TYPES]] = Query(None),
     user=Depends(get_current_user),
@@ -149,7 +188,6 @@ async def run_save_topology_single(
         raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
 
     return await _run_and_save_topology(basename, {filename: content}, target_path, analysis_types)
-
 
 @router.post("/analyze")
 async def analyze_topology_endpoint(
@@ -197,81 +235,61 @@ async def analyze_topology_endpoint(
 
     return {"status": "success", "results": all_results}
 
-
-@router.get("/diagram/single/{filename:path}", description="Generates a topology diagram for a single specified file.")
-async def get_single_diagram(
+@router.post("/diagram/save/single/{filename:path}", description="Generates and saves a topology diagram for a single specified file.")
+async def save_single_diagram(
     filename: str,
+    basename: str = "diag_res_r",
     project_id: Optional[str] = Query(None),
     user=Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    target_path = get_storage_path(user, project_id, db)
+    target_path = get_analysis_path(user, project_id, db, action="write")
     files = load_workspace_files(target_path)
     content = files.get(filename)
 
     if content is None:
-        raise HTTPException(status_code=404, detail=f"File '{filename}' not found in the project.")
+        raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
 
-    analysis_result = topology_setup.analyze_topology(content, filename)
-    if analysis_result.get("status") != "success":
-        raise HTTPException(status_code=400, detail=f"Could not analyze topology for {filename}.")
-        
-    diagram = topology_graph.build_diagram(analysis_result)
-    return {"file": filename, "diagram": diagram}
+    return await _build_and_save_diagrams(basename, {filename: content}, target_path)
 
-@router.post("/diagram/bulk", description="Generates topology diagrams for a specific list of files.")
-async def get_bulk_diagrams(
+@router.post("/diagram/save/bulk", description="Generates and saves topology diagrams for a specific list of files.")
+async def save_bulk_diagrams(
     payload: FileListPayload,
+    basename: str = "diag_res_b",
     project_id: Optional[str] = Query(None),
     user=Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    target_path = get_storage_path(user, project_id, db)
+    target_path = get_analysis_path(user, project_id, db, action="write")
     files = load_workspace_files(target_path)
     
-    all_diagrams = []
-    for filename in payload.filenames:
-        content = files.get(filename)
-        if content is None:
-            continue 
+    files_to_process = {fname: files[fname] for fname in payload.filenames if fname in files}
+    if not files_to_process:
+        raise HTTPException(status_code=404, detail="None of the specified files were found.")
 
-        analysis_result = topology_setup.analyze_topology(content, filename)
-        if analysis_result.get("status") == "success":
-            diagram = topology_graph.build_diagram(analysis_result)
-            all_diagrams.append({"file": filename, "diagram": diagram})
+    return await _build_and_save_diagrams(basename, files_to_process, target_path)
 
-    if not all_diagrams:
-        raise HTTPException(status_code=404, detail="Could not generate any diagrams for the specified files.")
-
-    return {"status": "success", "results": all_diagrams}
-
-@router.get("/diagram/all", description="Generates topology diagrams for all project files, with optional type filtering.")
-async def get_all_diagrams(
+@router.post("/diagram/save/all", description="Generates and saves topology diagrams for all project files.")
+async def save_all_diagrams(
+    basename: str = "diag_res",
     project_id: Optional[str] = Query(None),
     file_type: Literal['all', 'si2s', 'lf1s'] = Query('all'),
     user=Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    target_path = get_storage_path(user, project_id, db)
+    target_path = get_analysis_path(user, project_id, db, action="write")
     files = load_workspace_files(target_path)
     if not files:
         raise HTTPException(status_code=404, detail="No files found in the workspace.")
 
-    all_diagrams = []
+    files_to_process = {}
     for filename, content in files.items():
-        if not is_database_file(filename):
-            continue
-
+        if not is_database_file(filename): continue
         file_ext = filename.lower().split('.')[-1]
-        if file_type != 'all' and file_ext != file_type:
-            continue
+        if file_type != 'all' and file_ext != file_type: continue
+        files_to_process[filename] = content
 
-        analysis_result = topology_setup.analyze_topology(content, filename)
-        if analysis_result.get("status") == "success":
-            diagram = topology_graph.build_diagram(analysis_result)
-            all_diagrams.append({"file": filename, "diagram": diagram})
+    if not files_to_process:
+        raise HTTPException(status_code=404, detail=f"No files of type '{file_type}' found.")
 
-    if not all_diagrams:
-        raise HTTPException(status_code=404, detail="Could not generate any diagrams.")
-
-    return {"status": "success", "results": all_diagrams}
+    return await _build_and_save_diagrams(basename, files_to_process, target_path)
