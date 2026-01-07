@@ -47,13 +47,15 @@ def build_diagram(analysis_result: dict) -> dict:
 
         # B. Determine Horizontal Order (to minimize crossings)
         node_order = {}
+        # Initialize order based on initial sorted position
         for level, nodes in nodes_by_level.items():
             for i, node in enumerate(nodes):
                 node_order[node] = i
         
-        for _ in range(10): # More iterations help stabilize the order
+        # Use barycenter method to refine order and reduce crossings
+        for _ in range(10):
             for level in range(1, max_level + 1):
-                barycenters = {n: sum(node_order.get(p, 0) for p in G.predecessors(n)) / len(list(G.predecessors(n))) if G.predecessors(n) else node_order.get(n,0) for n in nodes_by_level[level]}
+                barycenters = {n: (sum(node_order.get(p, i) for p in G.predecessors(n)) / len(list(G.predecessors(n)))) if G.predecessors(n) else i for i, n in enumerate(nodes_by_level[level])}
                 nodes_by_level[level].sort(key=lambda n: (barycenters.get(n, -1), node_order.get(n)))
                 for i, node in enumerate(nodes_by_level[level]):
                     node_order[node] = i
@@ -64,18 +66,23 @@ def build_diagram(analysis_result: dict) -> dict:
         Y_SPACING, X_PADDING = 250, 100
         
         # Pass 1: Ideal X-position with alignment enforcement
+        current_x = 0
         for level in range(max_level + 1):
             y_pos = level * Y_SPACING
+            if level == 0:
+                # Initial placement for root nodes
+                for node_id in sorted_levels.get(level, []):
+                    positions[node_id] = {'x': current_x, 'y': y_pos}
+                    current_x += node_widths.get(node_id, 120) + X_PADDING
+                continue
+
             for node_id in sorted_levels.get(level, []):
                 parents = list(G.predecessors(node_id))
-                
                 ideal_x = 0
-                if level > 0 and parents:
-                    is_straight = len(parents) == 1 and len(list(G.successors(parents[0]))) == 1
-                    parent_id = parents[0]
-
-                    if is_straight:
-                        parent_center_x = positions[parent_id]['x'] + node_widths[parent_id] / 2
+                if parents:
+                    is_straight_line = len(parents) == 1 and len(list(G.successors(parents[0]))) == 1
+                    if is_straight_line:
+                        parent_center_x = positions[parents[0]]['x'] + node_widths[parents[0]] / 2
                         ideal_x = parent_center_x - node_widths[node_id] / 2
                     else:
                         parent_centers = [positions[p]['x'] + node_widths[p] / 2 for p in parents]
@@ -95,7 +102,7 @@ def build_diagram(analysis_result: dict) -> dict:
                         positions[level_nodes[j]]['x'] += shift
         
         # Pass 3: Center the diagram
-        min_x = min((p['x'] for p in positions.values()), default=0)
+        min_x = min((p.get('x', 0) for p in positions.values()), default=0)
         for node_id in G.nodes():
             if node_id in positions:
                 positions[node_id]['x'] -= min_x
