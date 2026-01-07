@@ -5,7 +5,7 @@ from collections import defaultdict
 def build_diagram(analysis_result: dict) -> dict:
     """
     Builds a React Flow diagram using a "Horizontal Center & Shift" layout algorithm 
-    to produce a readable left-to-right hierarchical graph.
+    with fixed node sizes for a clean, uniform appearance.
     """
     nodes_for_flow = []
     edges_for_flow = []
@@ -35,7 +35,10 @@ def build_diagram(analysis_result: dict) -> dict:
 
     # --- LAYOUT ALGORITHM: "Horizontal Center & Shift" ---
     positions = {}
-    node_heights = {nid: (25 if d.get('component_label') == 'Bus' else 70) for nid, d in all_equipment.items()}
+    # Define a fixed, optimal size for all nodes for consistency.
+    OPTIMAL_HEIGHT = 900
+    OPTIMAL_WIDTH = 500
+    node_heights = {nid: OPTIMAL_HEIGHT for nid in all_equipment}
 
     try:
         if not nx.is_directed_acyclic_graph(G):
@@ -47,38 +50,35 @@ def build_diagram(analysis_result: dict) -> dict:
             nodes_by_level[i] = sorted(list(generation))
         max_level = len(nodes_by_level) - 1
 
-        # Use barycenter method to refine vertical order within levels
         node_order = {node: i for level in nodes_by_level.values() for i, node in enumerate(level)}
-        for _ in range(8): # Iterations for stability
+        for _ in range(8):
             for level in range(1, max_level + 1):
                 barycenters = {n: sum(node_order.get(p, 0) for p in G.predecessors(n)) / len(list(G.predecessors(n))) if list(G.predecessors(n)) else -1 for n in nodes_by_level[level]}
                 nodes_by_level[level].sort(key=lambda n: barycenters.get(n, -1))
                 for i, node in enumerate(nodes_by_level[level]): node_order[node] = i
 
-        # B. Pass 1: Idealistic Placement (Center next to parents, ignore overlaps)
-        X_SPACING = 300
+        # B. Pass 1: Idealistic Placement (Center next to parents)
+        X_SPACING = OPTIMAL_WIDTH + 150 # Adjust spacing based on the new fixed width
         for level in range(max_level + 1):
             for node_id in nodes_by_level[level]:
-                height = node_heights.get(node_id, 70)
+                height = OPTIMAL_HEIGHT
                 ideal_y = 0
                 parents = list(G.predecessors(node_id))
                 if parents and all(p in positions for p in parents):
-                    parent_centers = [positions[p]['y'] + node_heights[p] / 2 for p in parents]
+                    parent_centers = [positions[p]['y'] + OPTIMAL_HEIGHT / 2 for p in parents]
                     ideal_y = sum(parent_centers) / len(parent_centers) - height / 2
                 positions[node_id] = {'x': level * X_SPACING, 'y': ideal_y}
         
         # C. Pass 2: Resolve Overlaps by Shifting Subtrees Downwards
-        Y_PADDING = 50
+        Y_PADDING = 100
         all_descendants = {n: nx.descendants(G, n) for n in G.nodes()}
         for level in range(max_level + 1):
             level_nodes = nodes_by_level[level]
             level_nodes.sort(key=lambda n: positions[n]['y'])
             
             for i in range(1, len(level_nodes)):
-                upper_node = level_nodes[i-1]
-                lower_node = level_nodes[i]
-                
-                upper_bound = positions[upper_node]['y'] + node_heights[upper_node]
+                upper_node, lower_node = level_nodes[i-1], level_nodes[i]
+                upper_bound = positions[upper_node]['y'] + OPTIMAL_HEIGHT
                 lower_bound = positions[lower_node]['y']
                 
                 if lower_bound < upper_bound + Y_PADDING:
@@ -97,17 +97,14 @@ def build_diagram(analysis_result: dict) -> dict:
 
     except (nx.NetworkXUnfeasible, nx.NetworkXError) as e:
         print(f"Graph layout error: {e}.")
-        positions = nx.spring_layout(G, iterations=50) # Fallback
+        positions = nx.spring_layout(G, iterations=50)
 
-    # 4. Generate React Flow JSON
+    # 4. Generate React Flow JSON with fixed sizes
     for node_id, data in all_equipment.items():
-        width = (350 if data.get('component_label') == 'Bus' else 120)
-        height = node_heights.get(node_id, 70)
         lightweight_data = {'label': node_id, 'component_type': data.get('component_label')}
-
         nodes_for_flow.append({
             "id": node_id, "type": "custom", "position": positions.get(node_id, {'x': 0, 'y': 0}),
-            "data": lightweight_data, "width": width, "height": height,
+            "data": lightweight_data, "width": OPTIMAL_WIDTH, "height": OPTIMAL_HEIGHT,
         })
         details_map[node_id] = data
 
