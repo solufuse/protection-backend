@@ -42,6 +42,7 @@ def build_diagram(analysis_result: dict) -> dict:
     root_nodes = [item['ID'] for item in analysis_result.get('incomer_analysis', []) if item.get('ID') in G]
 
     if root_nodes:
+        # A. Calculate levels using BFS from root nodes
         levels = {node: 0 for node in G.nodes()}
         for root in root_nodes:
             queue = [(root, 0)]
@@ -53,14 +54,42 @@ def build_diagram(analysis_result: dict) -> dict:
                     if v not in visited_bfs:
                         visited_bfs.add(v)
                         queue.append((v, level + 1))
-
-        X_SPACING, Y_SPACING = 250, 150
-        x_counts_per_level = {}
-        for node_id in sorted(list(G.nodes())):
+        
+        # B. Group nodes by level and pre-calculate widths
+        nodes_by_level = {}
+        node_widths = {}
+        for node_id, data in all_equipment.items():
+            width, _ = (350, 25) if data.get('component_type') == 'Bus' else (120, 70)
+            node_widths[node_id] = width
             level = levels.get(node_id, 0)
-            x_count = x_counts_per_level.get(level, 0)
-            positions[node_id] = {'x': x_count * X_SPACING, 'y': level * Y_SPACING}
-            x_counts_per_level[level] = x_count + 1
+            if level not in nodes_by_level:
+                nodes_by_level[level] = []
+            nodes_by_level[level].append(node_id)
+
+        # C. Position nodes with dynamic centering
+        Y_SPACING = 200  # Vertical spacing
+        X_PADDING = 50   # Horizontal padding
+
+        # Calculate total width for each level to find the max width
+        max_total_width = 0
+        level_widths = {}
+        for level, nodes in nodes_by_level.items():
+            # Sort nodes to ensure consistent ordering
+            nodes.sort() 
+            total_width = sum(node_widths[n] for n in nodes) + max(0, len(nodes) - 1) * X_PADDING
+            level_widths[level] = total_width
+            if total_width > max_total_width:
+                max_total_width = total_width
+
+        # Position nodes level by level
+        for level, nodes in nodes_by_level.items():
+            total_width = level_widths[level]
+            start_x = (max_total_width - total_width) / 2
+            current_x = start_x
+            for node_id in nodes:
+                # The 'x' position is the start of the node
+                positions[node_id] = {'x': current_x, 'y': level * Y_SPACING}
+                current_x += node_widths[node_id] + X_PADDING
 
     # 4. Generate React Flow JSON output
     for node_id, data in all_equipment.items():
