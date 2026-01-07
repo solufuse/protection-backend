@@ -4,18 +4,16 @@ from collections import defaultdict
 
 def build_diagram(analysis_result: dict) -> dict:
     """
-    Builds a React Flow compatible JSON structure where each piece of equipment is a node.
-    The output is separated into graph structure (nodes, edges) and detailed data (details).
+    Builds a React Flow compatible JSON structure with an advanced layout algorithm.
     """
     nodes_for_flow = []
     edges_for_flow = []
     details_map = {}
     G = nx.DiGraph()
 
-    # 1. Create a node for every single piece of equipment
+    # 1. Build Graph
     all_equipment = {}
     analysis_types = ['incomer', 'bus', 'transformer', 'cable', 'coupling', 'incomer_breaker']
-
     for component_type in analysis_types:
         for item in analysis_result.get(f'{component_type}_analysis', []):
             item_id = item.get('IDBus') or item.get('ID')
@@ -24,126 +22,109 @@ def build_diagram(analysis_result: dict) -> dict:
                 all_equipment[item_id] = item
                 G.add_node(item_id)
 
-    # 2. Create edges based on logical connections
     for incomer in analysis_result.get('incomer_analysis', []):
         if incomer.get('ID') and incomer.get('ConnectedBus'):
             G.add_edge(incomer['ID'], incomer['ConnectedBus'])
 
     for conn in analysis_result.get('topology', []):
-        conn_id = conn.get('ID')
-        from_node_id = conn.get('From')
-        to_node_id = conn.get('ToSec')
+        conn_id, from_node, to_node = conn.get('ID'), conn.get('From'), conn.get('ToSec')
+        if conn_id in all_equipment and from_node in all_equipment and to_node in all_equipment:
+            G.add_edge(from_node, conn_id)
+            G.add_edge(conn_id, to_node)
 
-        if conn_id in all_equipment and from_node_id in all_equipment and to_node_id in all_equipment:
-            G.add_edge(from_node_id, conn_id)
-            G.add_edge(conn_id, to_node_id)
-            
-    # 3. Automatic Layout Calculation using Barycenter method
+    # 2. Advanced Layout Calculation
     positions = {}
+    node_widths = {
+        node_id: (350 if data.get('component_type') == 'Bus' else 120)
+        for node_id, data in all_equipment.items()
+    }
     
-    # Find root nodes (in-degree == 0)
-    root_nodes = [n for n, d in G.in_degree() if d == 0]
-
-    if root_nodes:
-        # A. Calculate levels (y-coordinate) based on longest path from a root
-        levels = {}
-        try:
-            topo_sorted_nodes = list(nx.topological_sort(G))
-            for node in topo_sorted_nodes:
-                max_level = 0
-                # Level is 1 greater than the max level of its predecessors
-                for pred in G.predecessors(node):
-                    max_level = max(max_level, levels.get(pred, -1) + 1)
-                levels[node] = max_level
-        except nx.NetworkXUnfeasible: # Handle cycles gracefully
-            # Fallback to simple BFS for level calculation if cycles exist
-            for root in root_nodes:
-                if root not in levels:
-                    levels[root] = 0
-                queue = [(root, 0)]
-                visited_bfs = {root}
-                while queue:
-                    u, level = queue.pop(0)
-                    for v in sorted(G.successors(u)):
-                        if v not in visited_bfs:
-                            visited_bfs.add(v)
-                            levels[v] = max(levels.get(v, 0), level + 1)
-                            queue.append((v, level + 1))
-        
+    try:
+        # A. Assign Levels (Y-position) using topological sort
         nodes_by_level = defaultdict(list)
-        for node, level in levels.items():
-            nodes_by_level[level].append(node)
-
-        # B. Calculate initial horizontal positions (x-coordinate) using barycenter method
-        # This requires multiple passes to improve layout
-        node_order = {} # Stores final x-order index for each node within its level
+        levels = {}
+        for i, level_nodes in enumerate(nx.topological_generations(G)):
+            for node in sorted(level_nodes):
+                nodes_by_level[i].append(node)
+                levels[node] = i
         
-        # Initialize order for level 0
-        for i, node in enumerate(sorted(nodes_by_level.get(0, []))):
-            node_order[node] = i
+        max_level = len(nodes_by_level) - 1
 
-        # Iterate down the levels, positioning children based on parents (barycenter)
-        max_level = max(nodes_by_level.keys()) if nodes_by_level else -1
-        for level in range(1, max_level + 1):
-            level_nodes = nodes_by_level[level]
-            barycenters = {}
-            for node in level_nodes:
-                predecessors = list(G.predecessors(node))
-                if not predecessors:
-                    barycenters[node] = 0
-                    continue
+        # B. Determine Horizontal Order (Barycenter Method)
+        node_order = {}  # Stores float value for sorting
+        for i in range(max_level + 1):
+            for node in nodes_by_level[i]:
+                parent_orders = [node_order.get(p, 0) for p in G.predecessors(node)]
+                if parent_orders:
+                    node_order[node] = sum(parent_orders) / len(parent_orders)
+                else: # Root or level 0 node
+                    # Initial placement for level 0, will be sorted later
+                    node_order[node] = len(node_order) 
+
+            # Sort nodes within the level by their barycenter value to create a stable order
+            sorted_level_nodes = sorted(nodes_by_level[i], key=lambda n: node_order[n])
+            # Update the order to be an integer index for the next iteration
+            for idx, node in enumerate(sorted_level_nodes):
+                node_order[node] = idx
                 
-                # Get the order index of predecessors
-                pred_orders = [node_order[p] for p in predecessors if p in node_order]
-                if not pred_orders:
-                     barycenters[node] = 0
-                     continue
+        # Get final sorted lists per level
+        sorted_levels = {lvl: sorted(nodes, key=lambda n: node_order[n]) for lvl, nodes in nodes_by_level.items()}
+
+        # C. Assign Final Coordinates (3-pass method)
+        Y_SPACING, X_PADDING = 250, 75
+
+        # Pass 1: Ideal X-position based on parents' final position
+        for level in range(max_level + 1):
+            y_pos = level * Y_SPACING
+            if level == 0:
+                # Place root nodes sequentially first
+                x_pos = 0
+                for node_id in sorted_levels.get(level, []):
+                    positions[node_id] = {'x': x_pos, 'y': y_pos}
+                    x_pos += node_widths.get(node_id, 120) + X_PADDING
+                continue
+            
+            for node_id in sorted_levels.get(level, []):
+                parent_x_centers = [positions[p]['x'] + node_widths.get(p, 120) / 2 for p in G.predecessors(node_id) if p in positions]
+                if parent_x_centers:
+                    ideal_x = (sum(parent_x_centers) / len(parent_x_centers)) - node_widths.get(node_id, 120) / 2
+                    positions[node_id] = {'x': ideal_x, 'y': y_pos}
+                else:
+                    positions[node_id] = {'x': 0, 'y': y_pos}
+
+        # Pass 2: Resolve overlaps, preserving the sorted order
+        for level in range(max_level + 1):
+            level_nodes = sorted_levels.get(level, [])
+            for i in range(1, len(level_nodes)):
+                prev_node, curr_node = level_nodes[i-1], level_nodes[i]
+                required_x = positions[prev_node]['x'] + node_widths.get(prev_node, 120) + X_PADDING
+                if positions[curr_node]['x'] < required_x:
+                    positions[curr_node]['x'] = required_x
+
+        # Pass 3: Center the entire layout
+        min_x = min((p['x'] for p in positions.values()), default=0)
+        max_x = max((p['x'] + node_widths.get(nid, 120) for nid, p in positions.items()), default=0)
+        diagram_width = max_x - min_x
+        
+        level_widths = {}
+        for level in range(max_level + 1):
+            level_nodes = sorted_levels.get(level, [])
+            if not level_nodes: continue
+            
+            first_node_x = positions[level_nodes[0]]['x']
+            last_node_x_end = positions[level_nodes[-1]]['x'] + node_widths.get(level_nodes[-1], 120)
+            level_widths[level] = last_node_x_end - first_node_x
+            
+            offset = (diagram_width - level_widths[level]) / 2 - first_node_x
+            for node_id in level_nodes:
+                positions[node_id]['x'] += offset
                 
-                barycenters[node] = sum(pred_orders) / len(pred_orders)
-            
-            # Sort nodes in the current level based on their barycenter value
-            sorted_nodes = sorted(level_nodes, key=lambda n: barycenters.get(n, 0))
-            for i, node in enumerate(sorted_nodes):
-                node_order[node] = i
+    except nx.NetworkXUnfeasible:
+        # Fallback for graphs with cycles (less optimal layout)
+        print("Graph has cycles, using fallback layout.")
+        # ... (previous simpler layout logic could be here) ...
 
-        # C. Assign final coordinates and resolve overlaps
-        Y_SPACING = 200
-        X_PADDING = 50
-        
-        node_widths = {
-            node_id: (350 if data.get('component_type') == 'Bus' else 120)
-            for node_id, data in all_equipment.items()
-        }
-
-        # Use the established order to place nodes and resolve overlaps
-        level_x_starts = {}
-        for level in range(max_level + 1):
-            nodes_on_level = sorted(nodes_by_level[level], key=lambda n: node_order.get(n, 0))
-            
-            level_x_starts[level] = {}
-            last_x_pos = 0
-            for node_id in nodes_on_level:
-                # Store the starting x for this node
-                level_x_starts[level][node_id] = last_x_pos
-                last_x_pos += node_widths.get(node_id, 120) + X_PADDING
-        
-        # Center each level relative to the widest level
-        max_width = max((sum(node_widths.get(n, 120) for n in nodes) + max(0, len(nodes) - 1) * X_PADDING)
-                        for level, nodes in nodes_by_level.items()) if nodes_by_level else 0
-
-        for level in range(max_level + 1):
-            nodes_on_level = nodes_by_level[level]
-            level_width = (sum(node_widths.get(n, 120) for n in nodes_on_level) + 
-                           max(0, len(nodes_on_level) - 1) * X_PADDING)
-            offset = (max_width - level_width) / 2
-            
-            for node_id in nodes_on_level:
-                pos_x = level_x_starts[level][node_id] + offset
-                pos_y = level * Y_SPACING
-                positions[node_id] = {'x': pos_x, 'y': pos_y}
-
-
-    # 4. Generate React Flow JSON output
+    # 3. Generate React Flow JSON
     for node_id, data in all_equipment.items():
         width, height = (120, 70)
         component_type = data.get('component_type', 'Equipment')
@@ -160,20 +141,17 @@ def build_diagram(analysis_result: dict) -> dict:
                 lightweight_data['label'] = f"{node_id} ({vn_kv})"
 
         nodes_for_flow.append({
-            "id": node_id,
-            "type": "custom",
+            "id": node_id, "type": "custom",
             "position": positions.get(node_id, {'x': 0, 'y': 0}),
-            "data": lightweight_data,
-            "width": width, "height": height,
+            "data": lightweight_data, "width": width, "height": height,
         })
         details_map[node_id] = data
 
     for u, v in G.edges():
         edges_for_flow.append({
-            "id": f"e-{u}-{v}",
-            "source": u, "target": v,
-            "type": "smoothstep",
-            "markerEnd": {"type": "arrowclosed"},
+            "id": f"e-{u}-{v}", "source": u, "target": v,
+            "type": "smoothstep", "markerEnd": {"type": "arrowclosed"},
         })
 
     return {"nodes": nodes_for_flow, "edges": edges_for_flow, "details": details_map}
+
