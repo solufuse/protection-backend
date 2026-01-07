@@ -55,12 +55,12 @@ def build_diagram(analysis_result: dict) -> dict:
                         queue.append((v, level + 1))
 
         X_SPACING, Y_SPACING = 250, 150
-        y_counts_per_level = {}
+        x_counts_per_level = {}
         for node_id in sorted(list(G.nodes())):
             level = levels.get(node_id, 0)
-            y_count = y_counts_per_level.get(level, 0)
-            positions[node_id] = {'x': level * X_SPACING, 'y': y_count * Y_SPACING}
-            y_counts_per_level[level] = y_count + 1
+            x_count = x_counts_per_level.get(level, 0)
+            positions[node_id] = {'x': x_count * X_SPACING, 'y': level * Y_SPACING}
+            x_counts_per_level[level] = x_count + 1
 
     # 4. Generate React Flow JSON output
     for node_id, data in all_equipment.items():
