@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 from app.calculations import topology_setup, topology_graph
 from app.calculations.file_utils import is_database_file
 from ..database import get_db
-from ..auth import get_current_user, ProjectAccessChecker
-from ..guest_guard import check_guest_restrictions
-from .common import get_storage_path, load_workspace_files
+from ..auth import get_current_user
+from ..core.storage import get_target_path
+from .common import load_workspace_files
 
 router = APIRouter(prefix="/topology", tags=["Topology Analysis"])
 
@@ -21,22 +21,6 @@ ANALYSIS_TYPES = Literal['incomer', 'bus', 'transformer', 'cable', 'coupling', '
 
 class FileListPayload(BaseModel):
     filenames: List[str]
-
-def get_analysis_path(user, project_id: Optional[str], db: Session, action: str = "read"):
-    if project_id:
-        role_req = "editor" if action == "write" else "viewer"
-        checker = ProjectAccessChecker(required_role=role_req)
-        checker(project_id, user, db)
-        project_dir = os.path.join("/app/storage", project_id)
-        if not os.path.exists(project_dir): raise HTTPException(404, "Project directory not found")
-        return project_dir
-    else:
-        uid = user.firebase_uid
-        is_guest = False 
-        try:
-            if user.email is None or user.email == "": is_guest = True
-        except: pass
-        return check_guest_restrictions(uid, is_guest, action=action)
 
 async def _run_and_save_topology(
     basename: str,
@@ -125,32 +109,6 @@ async def _build_and_save_diagrams(
         "full_path": f"/diagram_results/{output_filename}"
     }
 
-@router.post("/run-and-save/all", description="Run analysis on all files and save results.")
-async def run_save_topology_all(
-    basename: str = "topo_res",
-    project_id: Optional[str] = Query(None),
-    file_type: Literal['all', 'si2s', 'lf1s'] = Query('all'),
-    analysis_types: Optional[List[ANALYSIS_TYPES]] = Query(None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    target_path = get_analysis_path(user, project_id, db, action="write")
-    files = load_workspace_files(target_path)
-    if not files:
-        raise HTTPException(status_code=404, detail="No files found in the workspace.")
-
-    files_to_process = {}
-    for filename, content in files.items():
-        if not is_database_file(filename): continue
-        file_ext = filename.lower().split('.')[-1]
-        if file_type != 'all' and file_ext != file_type: continue
-        files_to_process[filename] = content
-
-    if not files_to_process:
-        raise HTTPException(status_code=404, detail=f"No files of type '{file_type}' found.")
-
-    return await _run_and_save_topology(basename, files_to_process, target_path, analysis_types)
-
 @router.post("/run-and-save/bulk", description="Run analysis on a list of files and save results.")
 async def run_save_topology_bulk(
     payload: FileListPayload,
@@ -160,7 +118,7 @@ async def run_save_topology_bulk(
     user=Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    target_path = get_analysis_path(user, project_id, db, action="write")
+    target_path = get_target_path(user, project_id, db, action="write")
     files = load_workspace_files(target_path)
     if not files:
         raise HTTPException(status_code=404, detail="No files found in the workspace.")
@@ -171,24 +129,6 @@ async def run_save_topology_bulk(
 
     return await _run_and_save_topology(basename, files_to_process, target_path, analysis_types)
 
-@router.post("/run-and-save/single/{filename:path}", description="Run analysis on a single file and save results.")
-async def run_save_topology_single(
-    filename: str,
-    basename: str = "topo_res_r",
-    project_id: Optional[str] = Query(None),
-    analysis_types: Optional[List[ANALYSIS_TYPES]] = Query(None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    target_path = get_analysis_path(user, project_id, db, action="write")
-    files = load_workspace_files(target_path)
-    content = files.get(filename)
-
-    if content is None:
-        raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
-
-    return await _run_and_save_topology(basename, {filename: content}, target_path, analysis_types)
-
 @router.post("/analyze")
 async def analyze_topology_endpoint(
     project_id: Optional[str] = Query(None),
@@ -197,10 +137,10 @@ async def analyze_topology_endpoint(
     user=Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    """
+    '''
     Analyzes project topology for all files, identifying key components.
-    """
-    target_path = get_storage_path(user, project_id, db)
+    '''
+    target_path = get_target_path(user, project_id, db, action="read")
     files = load_workspace_files(target_path)
     if not files:
         raise HTTPException(status_code=404, detail="No files found in the workspace.")
@@ -235,61 +175,19 @@ async def analyze_topology_endpoint(
 
     return {"status": "success", "results": all_results}
 
-@router.post("/diagram/save/single/{filename:path}", description="Generates and saves a topology diagram for a single specified file.")
-async def save_single_diagram(
-    filename: str,
-    basename: str = "diag_res_r",
-    project_id: Optional[str] = Query(None),
-    user=Depends(get_current_user), 
-    db: Session = Depends(get_db)
-):
-    target_path = get_analysis_path(user, project_id, db, action="write")
-    files = load_workspace_files(target_path)
-    content = files.get(filename)
-
-    if content is None:
-        raise HTTPException(status_code=404, detail=f"File '{filename}' not found.")
-
-    return await _build_and_save_diagrams(basename, {filename: content}, target_path)
-
-@router.post("/diagram/save/bulk", description="Generates and saves topology diagrams for a specific list of files.")
-async def save_bulk_diagrams(
+@router.post("/diagram/save", description="Generates and saves topology diagrams for a specific list of files.")
+async def save_diagrams(
     payload: FileListPayload,
     basename: str = "diag_res_b",
     project_id: Optional[str] = Query(None),
     user=Depends(get_current_user), 
     db: Session = Depends(get_db)
 ):
-    target_path = get_analysis_path(user, project_id, db, action="write")
+    target_path = get_target_path(user, project_id, db, action="write")
     files = load_workspace_files(target_path)
     
     files_to_process = {fname: files[fname] for fname in payload.filenames if fname in files}
     if not files_to_process:
         raise HTTPException(status_code=404, detail="None of the specified files were found.")
-
-    return await _build_and_save_diagrams(basename, files_to_process, target_path)
-
-@router.post("/diagram/save/all", description="Generates and saves topology diagrams for all project files.")
-async def save_all_diagrams(
-    basename: str = "diag_res",
-    project_id: Optional[str] = Query(None),
-    file_type: Literal['all', 'si2s', 'lf1s'] = Query('all'),
-    user=Depends(get_current_user), 
-    db: Session = Depends(get_db)
-):
-    target_path = get_analysis_path(user, project_id, db, action="write")
-    files = load_workspace_files(target_path)
-    if not files:
-        raise HTTPException(status_code=404, detail="No files found in the workspace.")
-
-    files_to_process = {}
-    for filename, content in files.items():
-        if not is_database_file(filename): continue
-        file_ext = filename.lower().split('.')[-1]
-        if file_type != 'all' and file_ext != file_type: continue
-        files_to_process[filename] = content
-
-    if not files_to_process:
-        raise HTTPException(status_code=404, detail=f"No files of type '{file_type}' found.")
 
     return await _build_and_save_diagrams(basename, files_to_process, target_path)
