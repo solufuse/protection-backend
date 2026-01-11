@@ -90,9 +90,30 @@ def list_files(project_id: Optional[str] = Query(None), user = Depends(get_curre
     if not os.path.exists(target_dir): return {"files": []}
     
     files_info = []
+    
     for root, dirs, files in os.walk(target_dir):
+        # Exclude dot folders
         dirs[:] = [d for d in dirs if not d.startswith('.')]
-        
+
+        # Process directories
+        for d in dirs:
+            full_path = os.path.join(root, d)
+            rel_path = os.path.relpath(full_path, target_dir).replace("\\", "/")
+            try:
+                stat = os.stat(full_path)
+                dt_str = datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                files_info.append({
+                    "filename": d,
+                    "path": rel_path,
+                    "size": 0,
+                    "uploaded_at": dt_str,
+                    "content_type": "folder",
+                    "type": "folder"
+                })
+            except Exception:
+                continue
+
+        # Process files
         for f in files:
             if f.startswith('.'): continue
             
@@ -107,16 +128,17 @@ def list_files(project_id: Optional[str] = Query(None), user = Depends(get_curre
                 elif f.endswith(".pdf"): c_type = "application/pdf"
                 
                 files_info.append({
-                    "filename": rel_path,
+                    "filename": os.path.basename(f),
                     "path": rel_path,
                     "size": stat.st_size, 
                     "uploaded_at": dt_str, 
-                    "content_type": c_type
+                    "content_type": c_type,
+                    "type": "file"
                 })
             except Exception:
                 continue
 
-    files_info.sort(key=lambda x: x['uploaded_at'], reverse=True)
+    files_info.sort(key=lambda x: x['path'])
     return {"files": files_info}
 
 @router.post("/download")
